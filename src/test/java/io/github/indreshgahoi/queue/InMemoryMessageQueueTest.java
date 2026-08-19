@@ -53,4 +53,36 @@ class InMemoryMessageQueueTest {
         assertTrue(queue.receive().isEmpty());
     }
 
+    @Test
+    void receivedMessageMovesToInFlight() {
+        MessageQueue queue = new InMemoryMessageQueue();
+
+        queue.publish("A");
+
+        Message first = queue.receive().orElseThrow();
+
+        assertTrue(queue.receive().isEmpty());
+
+        assertTrue(queue.ack(first.id()));
+    }
+
+    @Test
+    void ackRemovesInFlightMessage() {
+        MessageQueue queue = new InMemoryMessageQueue();
+
+        queue.publish("A");
+
+        Message message = queue.receive().orElseThrow();
+
+        assertTrue(queue.ack(message.id()));
+        assertFalse(queue.ack(message.id()));
+    }
+
+    @Test
+    void ackOfUnknownMessageReturnsFalse() {
+        MessageQueue queue = new InMemoryMessageQueue();
+
+        assertFalse(queue.ack("unknown"));
+    }
+
 }

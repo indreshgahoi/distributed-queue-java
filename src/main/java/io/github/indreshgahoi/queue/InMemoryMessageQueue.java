@@ -2,11 +2,14 @@ package io.github.indreshgahoi.queue;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 public class InMemoryMessageQueue implements MessageQueue {
     private final Deque<Message> messages = new ArrayDeque<>();
+    private final Map<String, Message> inFlight = new HashMap<>();
 
     @Override
     public String publish(String payload) {
@@ -19,6 +22,16 @@ public class InMemoryMessageQueue implements MessageQueue {
 
     @Override
     public Optional<Message> receive() {
-        return Optional.ofNullable(messages.pollFirst());
+        Message message = messages.pollFirst();
+        if(message == null) {
+            return Optional.empty();
+        }
+        inFlight.put(message.id(), message);
+        return Optional.of(message);
+    }
+
+    @Override
+    public boolean ack(String messageId) {
+        return inFlight.remove(messageId) != null;
     }
 }
