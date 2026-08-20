@@ -1,7 +1,6 @@
 package io.github.indreshgahoi.queue;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -12,47 +11,55 @@ import java.util.Optional;
 import java.util.UUID;
 
 public class InMemoryMessageQueue implements MessageQueue {
-    private static final Duration VISIBILITY_TIMEOUT = Duration.ofSeconds(30);
 
-
-
-    private final Deque<Message> ready = new ArrayDeque<>();
+    private final Deque<QueueMessage> ready = new ArrayDeque<>();
+    private final Deque<Message> deadLetters = new ArrayDeque<>();
     private final Map<String, InFlightMessage> inFlightByReceiptHandle = new HashMap<>();
-    private final Clock clock ;
+    private final Clock clock;
+    private final QueueConfiguration config;
 
     public InMemoryMessageQueue(Clock clock) {
         this.clock = clock;
+        this.config = new QueueConfiguration();
     }
+
     public InMemoryMessageQueue() {
         this.clock = Clock.systemUTC();
+        this.config = new QueueConfiguration();
+    }
+
+    public InMemoryMessageQueue(Clock clock, QueueConfiguration config) {
+        this.clock = clock;
+        this.config = config;
     }
 
     @Override
     public String publish(String payload) {
         String id = UUID.randomUUID().toString();
 
-        ready.addLast(new Message(id, payload));
+        ready.addLast(new QueueMessage(new Message(id, payload), 1));
 
         return id;
     }
 
     @Override
     public Optional<Delivery> receive() {
-        Message message = ready.pollFirst();
-        if(message == null) {
+        QueueMessage qMessage = ready.pollFirst();
+        if (qMessage == null) {
             return Optional.empty();
         }
 
         Instant leaseUntil = clock.instant()
-                .plus(VISIBILITY_TIMEOUT);
+                .plus(config.visibilityTimeout());
 
         String receiptHandle = UUID.randomUUID().toString();
 
         inFlightByReceiptHandle.put(receiptHandle,
-                new InFlightMessage(message,
+                new InFlightMessage(qMessage.message(),
                         receiptHandle,
-                        leaseUntil));
-        return Optional.of(new Delivery(message, receiptHandle));
+                        leaseUntil,
+                        qMessage.nextAttempt()));
+        return Optional.of(new Delivery(qMessage.message(), receiptHandle, qMessage.nextAttempt()));
     }
 
     @Override
@@ -65,14 +72,28 @@ public class InMemoryMessageQueue implements MessageQueue {
         Instant now = clock.instant();
         int count = 0;
 
-        while(it.hasNext()) {
+        while (it.hasNext()) {
             var entry = it.next();
-            if(!entry.getValue().leaseUntil().isAfter(now)) {
-                ready.addLast(entry.getValue().message());
-                it.remove();
+
+            InFlightMessage inFlight = entry.getValue();
+
+            if (inFlight.leaseUntil().isAfter(now)) {
+                continue;
+            }
+            it.remove(); // invalidate the receipt handle
+
+            if (config.maxDeliveryAttempts() > inFlight.attempt()) {
+                ready.addLast(new QueueMessage(inFlight.message(),
+                                    inFlight.attempt() + 1));
                 count++;
+            }else {
+                deadLetters.addLast(inFlight.message());
             }
         }
         return count;
+    }
+
+    public int deadLetterCount() {
+        return deadLetters.size();
     }
 }

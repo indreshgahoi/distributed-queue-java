@@ -170,3 +170,91 @@ G18. Redelivery preserves the message id but creates a new receipt handle.
 G19. ack(receiptHandle) succeeds only for the current active recept handle.
 
 G20: An expired receipt handle becomes permanently invalid.
+
+## Version v0.5 — delivery attempts, bounded retries, and poison-message handling.
+This version exists because v 0.4 does not provide a way to handle messages that are repeatedly redelivered and never acknowledged.
+
+### Motivation
+Consider the following flow:
+```text
+M1 delivered -> consumer fails -> lease expires -> M1 redelivered -> consumer fails -> lease expires -> M1 redelivered -> ...
+```
+Without a bound, one poison message can retry forever.
+so the invariant would be
+> A message may be retried, but retry must be bounded by policy.
+
+### New Guarantees
+
+G21. Every delivery exposes a 1-based attempt number.
+
+G22. Redelivery increments the attempt number by one.
+
+G23. Message ID remains stable across attempts.
+
+G24. Receipt handle changes for every delivery attempt.
+
+G25. A message may be delivered at most maxDeliveryAttempts times.
+
+G26. If the final permitted attempt expires without ACK,
+the message moves to DEAD_LETTER.
+
+G27. DEAD_LETTER messages are not eligible for normal receive().
+```text
+                 publish
+                    |
+                    v
+                +-------+
+                | READY |
+                +-------+
+                    |
+                    | receive()
+                    v
+              +-----------+
+              | IN_FLIGHT |
+              +-----------+
+                |       |
+        ack()   |       | lease expires
+                |       |
+                v       v
+             +------+   attempts remaining?
+             | DONE |        |
+             +------+        +---- yes ----> READY
+                              |
+                              +---- no -----> DEAD_LETTER
+                              
+READY(attempt=1)
+      |
+      | receive()
+      v
+IN_FLIGHT(attempt=1)
+      |
+      | lease expires
+      v
+READY(attempt=2)
+      |
+      | receive()
+      v
+IN_FLIGHT(attempt=2)
+      |
+      | lease expires
+      v
+READY(attempt=3)
+      |
+      | receive()
+      v
+IN_FLIGHT(attempt=3)
+      |
+      +---------------- ack() ----------------> DONE
+      |
+      +-------- lease expires ---------------> DEAD_LETTER
+
+IN_FLIGHT
+   |
+   +-- valid receiptHandle + ack() --> DONE
+   |
+   +-- lease expires
+           |
+           +-- attempt < maxDeliveryAttempts --> READY
+           |
+           +-- attempt == maxDeliveryAttempts --> DEAD_LETTER
+```

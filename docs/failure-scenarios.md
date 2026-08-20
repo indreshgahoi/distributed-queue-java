@@ -81,3 +81,26 @@ C1's acknowledgement must not remove C2's active delivery.
 Invariant:
 
 Only the current active delivery may be acknowledged.
+
+## F4 — Poison message retries forever
+
+Sequence:
+
+1. M1 is delivered.
+2. Processing fails.
+3. Lease expires.
+4. M1 is redelivered.
+5. Processing fails again.
+6. The cycle repeats indefinitely.
+
+Result:
+
+The message consumes queue capacity and worker effort forever.
+
+Required behavior:
+
+Retries must be bounded.
+
+After the configured maximum delivery attempts,
+the message must leave the normal READY/IN_FLIGHT lifecycle
+and move to DEAD_LETTER.
