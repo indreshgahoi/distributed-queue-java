@@ -64,3 +64,77 @@ READY --------------------> IN_FLIGHT
                                 v
                               DONE
 ```
+
+## Version 0.3 — Finite leases and redelivery
+
+### Scope
+
+Version 0.3 extends acknowledgement semantics with a finite lease.
+The lease represents temporary ownership of a received message and
+prevents an unacknowledged message from remaining IN_FLIGHT forever.
+
+### New Guarantees
+
+G10. Every successful `receive()` gives the message a finite lease.
+
+G11. A message remains unavailable to other `receive()` calls while
+its lease is valid.
+
+G12. A successful `ack()` made before the lease expires permanently
+removes the message.
+
+G13. If the lease expires before a successful acknowledgement, the
+message becomes READY and may be delivered again.
+
+G14. A redelivered message retains its original message ID and payload.
+
+G15. A message is IN_FLIGHT under at most one valid lease at a time.
+
+```text
+                         receive
+                 +--------------------+
+                 |                    v
+              READY                IN_FLIGHT
+                 ^                    |
+                 |                    | ack before expiry
+                 | lease expires      v
+                 +------------------ DONE
+```
+
+### Acknowledgement After Lease Expiry
+
+If a message's lease has expired and the message has not been
+redelivered, `ack(messageId)` does not remove it.
+
+Acknowledgement in v0.3 identifies a message, not a particular
+delivery attempt. After the message is redelivered, a delayed
+acknowledgement from its previous consumer is indistinguishable from
+an acknowledgement by its current consumer. Preventing this race
+would require a unique receipt or lease token for each delivery and
+is outside the scope of v0.3.
+
+### Delivery and Ordering Semantics
+
+Version 0.3 provides **at-least-once delivery** with respect to
+consumer failure: a message that is received but not acknowledged
+before its lease expires becomes available again. Consequently, a
+message may be delivered more than once and consumers must tolerate
+duplicate processing.
+
+FIFO ordering applies to messages on their first delivery. Redelivery
+after lease expiry may change the observable order, so strict FIFO
+ordering is not guaranteed across redeliveries.
+
+### Explicit Non-Guarantees
+
+Version 0.3 provides no guarantee for:
+
+- exactly-once delivery or processing
+- fencing acknowledgements from expired delivery attempts
+- strict FIFO ordering across redeliveries
+- lease renewal or extension
+- retries with backoff or a maximum attempt count
+- dead-letter handling
+- concurrent access
+- durability or process failure recovery
+- distributed execution or clock coordination
