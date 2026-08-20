@@ -56,3 +56,28 @@ Ownership of an IN_FLIGHT message must be temporary.
 
 If acknowledgement does not arrive before the ownership period
 expires, the message must return to READY.
+
+## F3 — Stale consumer acknowledgement
+
+Initial state:
+
+M1 is delivered to C1 with receipt handle R1.
+
+Sequence:
+
+1. C1 receives M1 using R1.
+2. C1 stops making progress.
+3. R1's lease expires.
+4. M1 returns to READY.
+5. C2 receives M1 with a new receipt handle R2.
+6. C1 wakes up and tries to acknowledge R1.
+
+Required behavior:
+
+R1 must no longer be valid.
+
+C1's acknowledgement must not remove C2's active delivery.
+
+Invariant:
+
+Only the current active delivery may be acknowledged.

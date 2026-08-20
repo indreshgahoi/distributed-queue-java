@@ -12,7 +12,7 @@ class InMemoryMessageQueueTest {
 
         String messageId = queue.publish("hello");
 
-        Message message = queue.receive().orElseThrow();
+        Message message = queue.receive().orElseThrow().message();
 
         assertEquals(messageId, message.id());
         assertEquals("hello", message.payload());
@@ -27,9 +27,9 @@ class InMemoryMessageQueueTest {
         queue.publish("B");
         queue.publish("C");
 
-        assertEquals("A", queue.receive().orElseThrow().payload());
-        assertEquals("B", queue.receive().orElseThrow().payload());
-        assertEquals("C", queue.receive().orElseThrow().payload());
+        assertEquals("A", queue.receive().orElseThrow().message().payload());
+        assertEquals("B", queue.receive().orElseThrow().message().payload());
+        assertEquals("C", queue.receive().orElseThrow().message().payload());
 
     }
 
@@ -59,11 +59,11 @@ class InMemoryMessageQueueTest {
 
         queue.publish("A");
 
-        Message first = queue.receive().orElseThrow();
+        Delivery first = queue.receive().orElseThrow();
 
         assertTrue(queue.receive().isEmpty());
 
-        assertTrue(queue.ack(first.id()));
+        assertTrue(queue.ack(first.receiptHandle()));
     }
 
     @Test
@@ -72,10 +72,10 @@ class InMemoryMessageQueueTest {
 
         queue.publish("A");
 
-        Message message = queue.receive().orElseThrow();
+        String receiptHandle = queue.receive().orElseThrow().receiptHandle();
 
-        assertTrue(queue.ack(message.id()));
-        assertFalse(queue.ack(message.id()));
+        assertTrue(queue.ack(receiptHandle));
+        assertFalse(queue.ack(receiptHandle));
     }
 
     @Test
@@ -83,6 +83,17 @@ class InMemoryMessageQueueTest {
         MessageQueue queue = new InMemoryMessageQueue();
 
         assertFalse(queue.ack("unknown"));
+    }
+
+    @Test
+    void receiveReturnsReceiptHandle() {
+        MessageQueue queue = new InMemoryMessageQueue();
+        queue.publish("A");
+
+        Delivery delivery = queue.receive().orElseThrow();
+
+        assertNotNull(delivery.receiptHandle());
+        assertFalse(delivery.receiptHandle().isBlank());
     }
 
 }

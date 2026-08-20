@@ -6,7 +6,7 @@ public interface MessageQueue {
 
     String publish(String payload);
 
-    Optional<Message> receive();
+    Optional<Delivery> receive();
 
-    boolean ack(String messageId);
+    boolean ack(String receiptHandle);
 }

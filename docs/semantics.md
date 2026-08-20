@@ -138,3 +138,35 @@ Version 0.3 provides no guarantee for:
 - concurrent access
 - durability or process failure recovery
 - distributed execution or clock coordination
+
+## Version 0.4 — recipient handles/ delivery identity
+This phase exists because v0.3 ack(messageId) is now incorrect under lease.
+
+### Motivation
+The failure is 
+```text
+T0 C1 receives M1
+T1 C1 stalls before ack
+T2 M1 lease expires
+T3 M1 return to ready state
+T4 C2 receives M1
+T5 C1 wakes up
+T6 C1 calls ack(M1)
+```
+The issue with the above flow is that C1 acknowledges a delivery that C1 now longer owns.
+The violated invariant is :  
+> Only the owner of the current active delivery may acknowledge that delivery.
+So now we separate the message identity from the delivery identity.
+> messageIdentity != deliveryIdentity
+
+### New Guarantees
+
+G16. Every successful 'receive()' creates a unique receipt handle.
+
+G17. Receipt handles identify a delivery attempt, not messages.
+
+G18. Redelivery preserves the message id but creates a new receipt handle.
+
+G19. ack(receiptHandle) succeeds only for the current active recept handle.
+
+G20: An expired receipt handle becomes permanently invalid.

@@ -17,7 +17,7 @@ public class InMemoryMessageQueue implements MessageQueue {
 
 
     private final Deque<Message> ready = new ArrayDeque<>();
-    private final Map<String, InFlightMessage> inFlight = new HashMap<>();
+    private final Map<String, InFlightMessage> inFlightByReceiptHandle = new HashMap<>();
     private final Clock clock ;
 
     public InMemoryMessageQueue(Clock clock) {
@@ -37,7 +37,7 @@ public class InMemoryMessageQueue implements MessageQueue {
     }
 
     @Override
-    public Optional<Message> receive() {
+    public Optional<Delivery> receive() {
         Message message = ready.pollFirst();
         if(message == null) {
             return Optional.empty();
@@ -46,18 +46,22 @@ public class InMemoryMessageQueue implements MessageQueue {
         Instant leaseUntil = clock.instant()
                 .plus(VISIBILITY_TIMEOUT);
 
-        inFlight.put(message.id(),
-                new InFlightMessage(message, leaseUntil));
-        return Optional.of(message);
+        String receiptHandle = UUID.randomUUID().toString();
+
+        inFlightByReceiptHandle.put(receiptHandle,
+                new InFlightMessage(message,
+                        receiptHandle,
+                        leaseUntil));
+        return Optional.of(new Delivery(message, receiptHandle));
     }
 
     @Override
-    public boolean ack(String messageId) {
-        return inFlight.remove(messageId) != null;
+    public boolean ack(String receiptHandle) {
+        return inFlightByReceiptHandle.remove(receiptHandle) != null;
     }
 
-    public int requeueExpireMessages() {
-        Iterator<Map.Entry<String, InFlightMessage>> it = inFlight.entrySet().iterator();
+    public int requeueExpiredMessages() {
+        Iterator<Map.Entry<String, InFlightMessage>> it = inFlightByReceiptHandle.entrySet().iterator();
         Instant now = clock.instant();
         int count = 0;
 

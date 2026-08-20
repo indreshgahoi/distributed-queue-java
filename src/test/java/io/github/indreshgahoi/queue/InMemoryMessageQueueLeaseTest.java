@@ -25,11 +25,11 @@ class InMemoryMessageQueueLeaseTest {
     void inFlightMessageIsNotRedeliveredBeforeLeaseExpiry() {
 
         queue.publish("A");
-        Message firstDelivery = queue.receive().orElseThrow();
+        Message firstDelivery = queue.receive().orElseThrow().message();
 
         clock.advance(Duration.ofSeconds(29));
 
-        int reQueued = queue.requeueExpireMessages();
+        int reQueued = queue.requeueExpiredMessages();
 
         assertEquals(0, reQueued);
         assertTrue(queue.receive().isEmpty());
@@ -41,13 +41,13 @@ class InMemoryMessageQueueLeaseTest {
 
         queue.publish("A");
 
-        Message firstDelivery = queue.receive().orElseThrow();
+        Message firstDelivery = queue.receive().orElseThrow().message();
 
         clock.advance(Duration.ofSeconds(31));
 
-        int reQueued = queue.requeueExpireMessages();
+        int reQueued = queue.requeueExpiredMessages();
 
-        Message secondDelivery = queue.receive().orElseThrow();
+        Message secondDelivery = queue.receive().orElseThrow().message();
 
         assertEquals(1, reQueued);
         assertEquals(firstDelivery.id(), secondDelivery.id());
@@ -60,14 +60,14 @@ class InMemoryMessageQueueLeaseTest {
 
         queue.publish("A");
 
-        Message firstDelivery = queue.receive().orElseThrow();
+        Delivery firstDelivery = queue.receive().orElseThrow();
 
-        boolean acked = queue.ack(firstDelivery.id());
+        boolean acked = queue.ack(firstDelivery.receiptHandle());
 
 
         clock.advance(Duration.ofSeconds(31));
 
-        int reQueued = queue.requeueExpireMessages();
+        int reQueued = queue.requeueExpiredMessages();
 
         assertTrue(acked);
         assertEquals(0, reQueued);
@@ -79,13 +79,13 @@ class InMemoryMessageQueueLeaseTest {
 
         queue.publish("A");
 
-        Message firstDelivery = queue.receive().orElseThrow();
+        Message firstDelivery = queue.receive().orElseThrow().message();
 
         clock.advance(Duration.ofSeconds(30));
 
-        int reQueued = queue.requeueExpireMessages();
+        int reQueued = queue.requeueExpiredMessages();
 
-        Message secondDelivery = queue.receive().orElseThrow();
+        Message secondDelivery = queue.receive().orElseThrow().message();
 
         assertEquals(1, reQueued);
         assertEquals(firstDelivery.id(), secondDelivery.id());
@@ -100,18 +100,18 @@ class InMemoryMessageQueueLeaseTest {
         queue.publish("B");
         queue.publish("C");
 
-        Message firstDelivery = queue.receive().orElseThrow();
-        Message secondDelivery = queue.receive().orElseThrow();
-        Message thirdDelivery = queue.receive().orElseThrow();
+        Message firstDelivery = queue.receive().orElseThrow().message();
+        Message secondDelivery = queue.receive().orElseThrow().message();
+        Message thirdDelivery = queue.receive().orElseThrow().message();
 
         clock.advance(Duration.ofSeconds(31));
 
-        int reQueued = queue.requeueExpireMessages();
+        int reQueued = queue.requeueExpiredMessages();
 
         Set<Message> redeliveredMessages = Set.of(
-                queue.receive().orElseThrow(),
-                queue.receive().orElseThrow(),
-                queue.receive().orElseThrow()
+                queue.receive().orElseThrow().message(),
+                queue.receive().orElseThrow().message(),
+                queue.receive().orElseThrow().message()
         );
 
         assertEquals(3, reQueued);
@@ -127,19 +127,19 @@ class InMemoryMessageQueueLeaseTest {
 
         queue.publish("A");
 
-        Message a = queue.receive().orElseThrow();
+        Message a = queue.receive().orElseThrow().message();
 
         clock.advance(Duration.ofSeconds(20));
 
         queue.publish("B");
 
-        Message b = queue.receive().orElseThrow();
+        Message b = queue.receive().orElseThrow().message();
 
         clock.advance(Duration.ofSeconds(11));
 
-        int reQueued = queue.requeueExpireMessages();
+        int reQueued = queue.requeueExpiredMessages();
 
-        Message aRedelivered = queue.receive().orElseThrow();
+        Message aRedelivered = queue.receive().orElseThrow().message();
 
         assertEquals(1, reQueued);
         assertEquals(aRedelivered.id(), a.id());
@@ -152,24 +152,85 @@ class InMemoryMessageQueueLeaseTest {
 
         queue.publish("A");
 
-        Message first = queue.receive().orElseThrow();
+        Message first = queue.receive().orElseThrow().message();
 
         clock.advance(Duration.ofSeconds(31));
-        queue.requeueExpireMessages();
+        queue.requeueExpiredMessages();
 
-        Message second = queue.receive().orElseThrow();
+        Message second = queue.receive().orElseThrow().message();
 
         assertEquals(first.id(), second.id());
 
         clock.advance(Duration.ofSeconds(29));
 
-        assertEquals(0, queue.requeueExpireMessages());
+        assertEquals(0, queue.requeueExpiredMessages());
         assertTrue(queue.receive().isEmpty());
 
         clock.advance(Duration.ofSeconds(1));
 
-        assertEquals(1, queue.requeueExpireMessages());
-        assertEquals(first.id(), queue.receive().orElseThrow().id());
+        assertEquals(1, queue.requeueExpiredMessages());
+        assertEquals(first.id(), queue.receive().orElseThrow().message().id());
+    }
+
+    @Test
+    void redeliveryUsesSameMessageIdButNewReceiptHandle() {
+        queue.publish("A");
+
+        Delivery first = queue.receive().orElseThrow();
+
+        clock.advance(Duration.ofSeconds(30));
+        queue.requeueExpiredMessages();
+
+        Delivery second = queue.receive().orElseThrow();
+
+        assertEquals(
+                first.message().id(),
+                second.message().id()
+        );
+
+        assertNotEquals(
+                first.receiptHandle(),
+                second.receiptHandle()
+        );
+    }
+
+    @Test
+    void staleReceiptHandleCannotAcknowledgeNewDelivery() {
+        queue.publish("A");
+
+        Delivery first = queue.receive().orElseThrow();
+
+        clock.advance(Duration.ofSeconds(30));
+        queue.requeueExpiredMessages();
+
+        Delivery second = queue.receive().orElseThrow();
+
+        assertFalse(queue.ack(first.receiptHandle()));
+
+        // The second delivery must still be active.
+        assertTrue(queue.ack(second.receiptHandle()));
+    }
+
+    @Test
+    void expiredReceiptHandleBecomesInvalid() {
+        queue.publish("A");
+
+        Delivery delivery = queue.receive().orElseThrow();
+
+        clock.advance(Duration.ofSeconds(30));
+        queue.requeueExpiredMessages();
+
+        assertFalse(queue.ack(delivery.receiptHandle()));
+    }
+
+    @Test
+    void currentReceiptHandleCanAcknowledgeMessage() {
+        queue.publish("A");
+
+        Delivery delivery = queue.receive().orElseThrow();
+
+        assertTrue(queue.ack(delivery.receiptHandle()));
+        assertFalse(queue.ack(delivery.receiptHandle()));
     }
 
 }
