@@ -12,4 +12,10 @@ public interface MessageQueue {
     boolean ack(String receiptHandle);
 
     boolean nack(String receiptHandle, Duration retryDelay);
+
+    int requeueExpiredMessages();
+
+    int makeDelayedMessagesReady();
+
+    int deadLetterCount();
 }

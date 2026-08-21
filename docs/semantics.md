@@ -315,3 +315,50 @@ stateDiagram-v2
 
     DELAYED --> READY: retryAt <= now
 ```
+## Version v0.7 — concurrency correctness
+### Motivation
+> A message must never be owned by two consumers at the same time.  
+For example:
+```text
+Consumer C1                Consumer C2
+
+poll READY M1
+                            poll READY M1 ?
+```
+The implementation must make this transition atomic.
+```text
+READY -> IN_FLIGHT
+```
+Notes on Reentrant lock:
+ReentrantLock provides exclusive ownership of a critical section. Internally it uses AQS, which maintains synchronization state and 
+queues contending threads. In the uncontended path, acquisition can succeed through an atomic state transition. 
+Under contention, threads may be queued and parked until the lock becomes available. 
+It's reentrant because the owning thread can acquire the same lock multiple times, with a hold count tracking nested acquisitions. 
+Unlock decrements that count, and the lock becomes available when it reaches zero. It also establishes the required happens-before relationship 
+for memory visibility.
+
+### New Guarantees
+G41. Queue operations are safe for concurrent invocation.
+
+G42. A READY message can transition to IN_FLIGHT exactly once
+for a given delivery attempt.
+
+G43. No two active receipt handles may represent the same
+delivery attempt.
+
+G44. ACK and NACK on the same active delivery cannot both succeed.
+
+G45. Lease-expiry processing cannot race with ACK/NACK in a way
+that creates duplicate READY entries.
+
+G45. Delayed-message promotion cannot move the same delayed
+message to READY more than once.
+
+The lock protects queue state transitions spanning READY,
+IN_FLIGHT, DELAYED, DONE and DEAD_LETTER.
+
+This design intentionally prioritizes correctness and simple
+reasoning over maximum parallelism.
+
+Fine-grained locking is deferred until measurement demonstrates
+that lock contention is a meaningful bottleneck.
