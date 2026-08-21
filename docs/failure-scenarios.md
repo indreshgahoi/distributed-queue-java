@@ -104,3 +104,16 @@ Retries must be bounded.
 After the configured maximum delivery attempts,
 the message must leave the normal READY/IN_FLIGHT lifecycle
 and move to DEAD_LETTER.
+
+## F5 - Know failure has to wait for the lease to expire before redelivery
+
+Sequence:
+1. M1 is delivered to C1.
+2. C1 fails in M1 processing
+3. M1 has to wait for the lease to expire before it can be redelivered to another consumer.
+
+Result:
+ C1 nack(M1) as soon as it knows that M1 processing has failed, but M1 is not redelivered until the lease expires.
+
+Required behavior:
+ A consumer should be able to explicitly reject its current delivery using nack() and request retry after a delay/backoff without waiting for the lease to expire.

@@ -258,3 +258,60 @@ IN_FLIGHT
            |
            +-- attempt == maxDeliveryAttempts --> DEAD_LETTER
 ```
+
+## Version v0.6 — explicit NACK + retry delay/backoff
+Right now, a consumer failure is represented ony by not ACKing and waiting for lease expiry. That works, but it is very 
+inefficient when consumer already knows processing failed.
+The new requirement is :
+> A consumer should be able to explicitly reject the current delivery and request retry without waiting for visibility
+> lease to expire.
+
+### New Guarantees
+G28. A consumer may explicitly reject its current delivery using nack().
+
+G29. nack() succeeds only for the currently active receipt handle.
+
+G30. A successful nack() immediately invalidates that receipt handle.
+
+G31. If delivery attempts remain, nack() moves the message from IN_FLIGHT
+to DELAYED.
+
+G32. A DELAYED message is not eligible for receive() before retryAt.
+
+G33. A DELAYED message becomes READY when now >= retryAt.
+
+G34. Redelivery after nack() preserves the message ID and creates a new
+receipt handle.
+
+G35. Redelivery after nack() increments the delivery attempt by one.
+
+G36. If nack() is called on the final permitted delivery attempt, the
+message moves directly to DEAD_LETTER.
+
+G37. An expired or stale receipt handle cannot nack a newer delivery.
+
+G38. ACK and NACK are mutually exclusive for a delivery: once either
+succeeds, the receipt handle is permanently invalid.
+
+G39. Delayed messages are appended to the tail of READY when their retry
+delay expires; strict global FIFO ordering is therefore not guaranteed.
+
+G40. v0.6 does not automatically process delayed messages in a background
+thread. Time-based transitions occur only when the explicit delayed
+message recovery operation is invoked.
+```mermaid
+stateDiagram-v2
+    [*] --> READY: publish()
+
+    READY --> IN_FLIGHT: receive()
+
+    IN_FLIGHT --> DONE: ack(receiptHandle)
+
+    IN_FLIGHT --> READY: lease expires\nattempt < maxAttempts
+    IN_FLIGHT --> DEAD_LETTER: lease expires\nattempt == maxAttempts
+
+    IN_FLIGHT --> DELAYED: nack(receiptHandle, retryDelay)\nattempt < maxAttempts
+    IN_FLIGHT --> DEAD_LETTER: nack(receiptHandle, retryDelay)\nattempt == maxAttempts
+
+    DELAYED --> READY: retryAt <= now
+```
