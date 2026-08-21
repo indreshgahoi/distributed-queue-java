@@ -394,3 +394,32 @@ No snapshotting
 No cross-machine durability
 No concurrent multi-process access to one WAL
 No filesystem corruption recovery guarantee yet
+## Version v 0.8.2
+G52. A successfully acknowledged message must not
+reappear after restart.
+
+G53. ACK is considered successful only after its WAL
+record has been durably appended.
+
+G54. Recovery applies ACK records to the logical message
+identified by messageId.
+
+G55. Receipt handles are runtime delivery ownership tokens
+and are not restored as active ownership after restart.
+
+PUBLISH M1
+↓
+receive M1
+↓
+ACK M1
+↓
+JVM crashes
+↓
+restart
+↓
+WAL only contains PUBLISH M1
+↓
+M1 comes back
+
+That violates:
+An acknowledged message must not reappear after recovery.

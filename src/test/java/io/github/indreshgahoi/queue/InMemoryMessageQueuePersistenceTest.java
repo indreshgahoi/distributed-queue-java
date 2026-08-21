@@ -5,6 +5,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -233,11 +235,104 @@ class InMemoryMessageQueuePersistenceTest {
         }
     }
 
+    @Test
+    void acknowledgedMessageDoesNotReappearAfterRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+            queue.publish("A");
+
+            Delivery delivery = queue.receive().orElseThrow();
+
+            assertTrue(
+                    queue.ack(delivery.receiptHandle())
+            );
+        }
+
+        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+            assertTrue(recovered.receive().isEmpty());
+        }
+    }
+
+    @Test
+    void ackWalFailureDoesNotRemoveInFlightDelivery() {
+        FailOnAckWal wal = new FailOnAckWal();
+
+        try (
+                InMemoryMessageQueue queue =
+                        new InMemoryMessageQueue(
+                                Clock.systemUTC(),
+                                new QueueConfiguration(),
+                                wal
+                        )
+        ) {
+            queue.publish("A");
+
+            Delivery delivery =
+                    queue.receive().orElseThrow();
+
+            assertThrows(
+                    WalException.class,
+                    () -> queue.ack(
+                            delivery.receiptHandle()
+                    )
+            );
+
+            /*
+             * Now allow WAL writes again.
+             *
+             * If the failed ACK incorrectly removed the
+             * IN_FLIGHT entry, this second ack() would
+             * return false.
+             */
+            wal.allowAck();
+
+            assertTrue(
+                    queue.ack(
+                            delivery.receiptHandle()
+                    )
+            );
+        }
+    }
+
     private InMemoryMessageQueue createQueue(Path walPath) {
         return new InMemoryMessageQueue(
                 Clock.systemUTC(),
                 new QueueConfiguration(),
                 new FileWriteAheadLog(walPath)
         );
+    }
+    private static final class FailOnAckWal
+            implements WriteAheadLog {
+
+        private final List<WalRecord> records =
+                new ArrayList<>();
+
+        private boolean failAck = true;
+
+        @Override
+        public void append(WalRecord record) {
+
+            if (record.type() == WalRecordType.ACK && failAck) {
+                throw new WalException(
+                        "Simulated ACK WAL failure"
+                );
+            }
+
+            records.add(record);
+        }
+
+        @Override
+        public List<WalRecord> readAll() {
+            return List.copyOf(records);
+        }
+
+        void allowAck() {
+            failAck = false;
+        }
+
+        @Override
+        public void close() {
+        }
     }
 }

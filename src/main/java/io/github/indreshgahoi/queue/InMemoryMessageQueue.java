@@ -7,6 +7,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -226,14 +227,27 @@ public final class InMemoryMessageQueue
         lock.lock();
 
         try {
-            /*
-             * ACK is still memory-only in v0.8.1.
-             *
-             * We deliberately make durable ACK
-             * a later step.
-             */
-            return inFlightByReceiptHandle
-                    .remove(receiptHandle) != null;
+            InFlightMessage inFlight =
+                    inFlightByReceiptHandle.get(receiptHandle);
+
+            if (inFlight == null) {
+                return false;
+            }
+
+            wal.append(
+                    new WalRecord(
+                            WalRecordType.ACK,
+                            inFlight.message().id(),
+                            null,
+                            receiptHandle,
+                            inFlight.attempt(),
+                            clock.instant()
+                    )
+            );
+
+            inFlightByReceiptHandle.remove(receiptHandle);
+
+            return true;
 
         } finally {
             lock.unlock();
@@ -420,29 +434,31 @@ public final class InMemoryMessageQueue
     }
 
     private void recover() {
-        List<WalRecord> records =
-                wal.readAll();
+        Map<String, QueueMessage> recovered =
+                new LinkedHashMap<>();
 
-        for (WalRecord record : records) {
-            applyRecoveredRecord(record);
+        for (WalRecord record : wal.readAll()) {
+            switch (record.type()) {
+                case PUBLISH -> recovered.put(
+                        record.messageId(),
+                        new QueueMessage(
+                                new Message(
+                                        record.messageId(),
+                                        record.payload()
+                                ),
+                                record.attempt()
+                        )
+                );
+
+                case ACK -> recovered.remove(
+                        record.messageId()
+                );
+            }
         }
+
+        ready.addAll(recovered.values());
     }
 
-    private void applyRecoveredRecord(
-            WalRecord record
-    ) {
-        switch (record.type()) {
-
-            case PUBLISH ->
-                    recoverPublish(record);
-
-            default ->
-                    throw new WalException(
-                            "Unsupported WAL record type during recovery: "
-                                    + record.type()
-                    );
-        }
-    }
 
     private void recoverPublish(
             WalRecord record
