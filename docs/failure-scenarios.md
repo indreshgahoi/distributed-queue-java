@@ -117,3 +117,18 @@ Result:
 
 Required behavior:
  A consumer should be able to explicitly reject its current delivery using nack() and request retry after a delay/backoff without waiting for the lease to expire.
+
+## F5 — Process crashes after publish
+
+T0  Producer publishes M1
+T1  publish() returns success
+T2  JVM crashes
+T3  JVM restarts
+
+Current behavior:
+M1 is gone.
+
+Required behavior:
+If publish() returned success, M1 must be recoverable
+after restart.
+> A state transition must not be reported successful until the corresponding durable record has been written according to the queue's durability contract.

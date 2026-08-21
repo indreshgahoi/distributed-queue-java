@@ -362,3 +362,35 @@ reasoning over maximum parallelism.
 
 Fine-grained locking is deferred until measurement demonstrates
 that lock contention is a meaningful bottleneck.
+
+## Version v0.8 -- durability with append only WAL.
+This is a major phase shift. Until now, the queue is correct only while the process is alive. if the JVM crashes, 
+every READY, IN_FLIGHT, DELAYED, DONE and DEAD_LETTER message disappears.
+The new requirement is:
+> Successfully accepted queue state must survive restart.
+What must hold.
+> A state transition must not be reported successful until the corresponding durable record has been written according to the queue's durability contract.
+
+### New Guarantees
+G46. A successfully published message survives queue restart.
+
+G47. Queue recovery reconstructs state by replaying the WAL.
+
+G48. WAL append occurs before the corresponding in-memory
+state transition is exposed as successful.
+
+G49. An acknowledged message must not reappear after successful
+recovery.
+
+G50. Recovery preserves the stable message identity.
+
+G51. v0.8 durability applies to a single queue process and a
+single local WAL file only.
+
+No guarantee for v0.8
+No replication
+No WAL compaction
+No snapshotting
+No cross-machine durability
+No concurrent multi-process access to one WAL
+No filesystem corruption recovery guarantee yet
