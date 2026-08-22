@@ -352,7 +352,26 @@ public final class InMemoryMessageQueue
 
                     continue;
                 }
+                boolean isMoveToDeadLetter = inFlight.attempt() >= config.maxDeliveryAttempts();
+                int nextAttempt =
+                        inFlight.attempt() + 1;
 
+                /*
+                 * WAL FIRST.
+                 *
+                 * If this fails, iterator.remove() is never reached.
+                 * Therefore the current delivery remains IN_FLIGHT
+                 * and its receipt handle remains valid.
+                 */
+
+                wal.append(new WalRecord(
+                        isMoveToDeadLetter ? WalRecordType.DEAD_LETTER: WalRecordType.LEASE_EXPIRED,
+                        inFlight.message().id(),
+                        null, // NACK doest need to persist payload
+                        inFlight.receiptHandle(),
+                        inFlight.attempt() + 1,
+                        now
+                ));
                 /*
                  * Lease expired.
                  *
@@ -361,8 +380,7 @@ public final class InMemoryMessageQueue
                  */
                 iterator.remove();
 
-                if (inFlight.attempt()
-                        >= config.maxDeliveryAttempts()) {
+                if (isMoveToDeadLetter) {
 
                     deadLetters.addLast(
                             inFlight.message()
@@ -374,7 +392,7 @@ public final class InMemoryMessageQueue
                 ready.addLast(
                         new QueueMessage(
                                 inFlight.message(),
-                                inFlight.attempt() + 1
+                                nextAttempt
                         )
                 );
 
@@ -517,6 +535,23 @@ public final class InMemoryMessageQueue
                             new RecoveryState(
                                     current.message(),
                                     RecoveryStatus.DEAD_LETTER,
+                                    record.attempt(),
+                                    null
+                            )
+                    );
+                }
+                case LEASE_EXPIRED -> {
+                    RecoveryState current =
+                            requireExistingState(
+                                    states,
+                                    record.messageId()
+                            );
+
+                    states.put(
+                            record.messageId(),
+                            new RecoveryState(
+                                    current.message(),
+                                    RecoveryStatus.READY,
                                     record.attempt(),
                                     null
                             )

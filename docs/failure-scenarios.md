@@ -230,3 +230,55 @@ retryAt = 10:00:30
 **Mental Model**  
 Persist decisions, not enough information to accidentally make a different
 decision during recovery.
+
+## F9 — Lease Expiry Attempt Is Lost After Restart
+
+### Sequence
+
+1. M1 is published.
+2. M1 is delivered as attempt 1 with receipt R1.
+3. R1's visibility lease expires.
+4. `requeueExpiredMessages()` successfully requeues M1.
+5. M1 is now READY for attempt 2.
+6. JVM crashes.
+7. Queue restarts.
+
+### Current Durable History
+
+PUBLISH M1
+
+### Incorrect Recovery
+
+M1 -> READY(attempt=1)
+
+### Required Recovery
+
+M1 -> READY(attempt=2)
+
+### Root Cause
+
+The lease-expiry transition exists only in volatile memory.
+
+### Required Fix
+
+Persist the lease-expiry transition before changing the in-memory state.
+
+## F10 — WAL Failure During Lease Expiry
+
+### Sequence
+
+M1 = IN_FLIGHT(R1, attempt=1)
+|
+lease expires
+|
+LEASE_EXPIRED WAL append fails
+
+### Required Result
+
+M1 must remain IN_FLIGHT under R1.
+
+The queue must not expose a partially completed transition.
+
+### Invariant
+
+A failed durable state transition must leave the previous runtime state intact.

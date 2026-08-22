@@ -477,3 +477,61 @@ v0.8.3 does not yet guarantee:
 - WAL compaction
 - snapshots
 - corruption recovery
+
+## Version 0.8.4 — Durable Lease Expiry
+
+### G61 — Successful Lease Expiry Transition Is Durable
+
+When an expired IN_FLIGHT delivery is requeued, the transition must be
+persisted before the in-memory state is changed.
+
+Required ordering:
+
+IN_FLIGHT
+|
+| lease expires
+v
+
+append LEASE_EXPIRED to WAL
+|
+v
+
+remove IN_FLIGHT
+|
+v
+
+READY(nextAttempt)
+
+
+### G64 — Delivery Attempt Survives Restart
+
+If attempt N expires and is successfully requeued, recovery must reconstruct
+the message with:
+
+nextAttempt = N + 1
+
+Restart must not reset the message to attempt 1.
+
+
+### G65 — Expired Receipt Handle Is Invalid
+
+Once lease expiry has successfully transitioned the message, the old receipt
+handle no longer owns the message.
+
+ACK or NACK using that receipt handle must fail.
+
+
+### G66 — WAL Failure Does Not Expire Ownership
+
+If the LEASE_EXPIRED WAL append fails, the queue must not partially apply the
+transition.
+
+The message remains IN_FLIGHT with its existing receipt handle.
+
+
+### G67 — Recovery Produces One Logical Message State
+
+Repeated lease expiries, NACKs, ACKs and publishes must fold into one final
+logical state per message.
+
+Recovery must not create duplicate READY or DELAYED representations.
