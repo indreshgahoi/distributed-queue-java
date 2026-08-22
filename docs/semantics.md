@@ -423,3 +423,57 @@ M1 comes back
 
 That violates:
 An acknowledged message must not reappear after recovery.
+
+## Version 0.8.3 — Durable NACK and Delayed Retry Recovery
+
+### Scope
+
+Version 0.8.3 extends WAL durability to explicit negative acknowledgement.
+
+A successful `nack()` must preserve the message's delayed-retry state across
+process restart.
+
+This version still uses:
+
+- a single local WAL
+- one queue process
+- explicit delayed-message promotion
+- no background retry scheduler
+- no replication
+
+---
+
+## New Guarantees
+
+G56 — Successful NACK Is Durable
+G57 — Delayed State Survives Restart
+G58 — Retry Schedule Survives Restart
+G59 — Retry Attempt Survives Restart
+G60 — Message Identity Survives NACK Recovery
+G61 — Old Receipt Handle Is Not Restored, After success nack()
+G62 — NACK WAL Failure Is Atomic
+G63 — Final-Attempt NACK Does Not Enter DELAYED
+
+A successful `nack()` must be recorded in the WAL before the corresponding
+in-memory transition is considered successful.
+
+The transition is:
+
+```text
+IN_FLIGHT
+    |
+    | nack(retryDelay)
+    v
+DELAYED
+```
+If the WAL append fails, the message must remain IN_FLIGHT.
+
+v0.8.3 does not yet guarantee:
+- durable lease-expiry transitions
+- durable dead-letter transitions unless separately implemented
+- background delayed-message promotion
+- replication
+- multi-process WAL sharing
+- WAL compaction
+- snapshots
+- corruption recovery

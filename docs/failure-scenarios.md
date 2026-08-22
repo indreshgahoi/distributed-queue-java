@@ -132,3 +132,101 @@ Required behavior:
 If publish() returned success, M1 must be recoverable
 after restart.
 > A state transition must not be reported successful until the corresponding durable record has been written according to the queue's durability contract.
+
+## F6 — NACKed Message Loses Its Retry Schedule After Restart
+
+### Initial State
+
+M1 is currently IN_FLIGHT on delivery attempt 1.
+
+```text
+M1
+state = IN_FLIGHT
+attempt = 1
+receiptHandle = R1
+```
+Sequence
+1. Consumer processing fails.
+2. Consumer calls:
+   nack(R1, 30 seconds)
+3. The queue moves M1 to:
+   DELAYED
+   nextAttempt = 2
+   retryAt = 10:00:30
+4. nack() returns success.
+5. The JVM crashes at 10:00:10.
+6. The queue restarts at 10:00:15.
+   Current Behavior
+   If only PUBLISH and ACK are durable, recovery sees:
+   PUBLISH M1
+   but does not know that M1 was successfully NACKed.
+   Recovery therefore reconstructs:
+   M1 -> READY
+   immediately.
+   **Problem**
+   The restart changes externally visible queue behavior.
+   M1 becomes eligible before its previously accepted retry time.
+   This violates the successful NACK contract.
+   **Violated Requirement**
+   A successful state transition that changes future message eligibility must
+   survive restart.
+   **Required Behavior**
+   The NACK transition must be durably recorded before nack() returns success.
+   The durable record must contain enough information to reconstruct:
+   message identity
+   next delivery attempt
+   absolute retry eligibility time
+   After restart:
+   now < retryAt
+   -> remain DELAYED
+
+   now >= retryAt
+   -> eligible to move to READY
+
+## F7 — NACK WAL Failure After In-Memory Removal
+Sequence
+1. M1 is IN_FLIGHT with receipt handle R1.
+2. nack(R1, 30s) begins.
+3. The implementation removes R1 from IN_FLIGHT.
+4. WAL append fails.
+5. nack() throws an exception.    
+   **Incorrect Result**  
+   M1 is no longer IN_FLIGHT, but the NACK was not durable.  
+   The queue has lost the active ownership state despite the operation failing.  
+   **Required Ordering**  
+   validate receipt handle    
+   |  
+   calculate retryAt  
+   |  
+   append NACK WAL record    
+   |  
+   WAL succeeds    
+   |  
+   remove IN_FLIGHT    
+   |  
+   add DELAYED    
+   If WAL append fails:    
+   IN_FLIGHT must remain unchanged    
+   **Invariant**  
+   > A failed durable transition must not partially mutate the in-memory queue state.  
+
+## F8 — Retry Delay Is Recalculated Incorrectly After Restart
+**Sequence**
+10:00:00 nack(M1, 30 seconds)  
+10:00:10 JVM crashes  
+10:00:20 JVM restarts  
+**Incorrect Recovery**  
+If the WAL stores only:  
+retryDelay = 30 seconds 
+and recovery calculates: 
+retryAt = restartTime + retryDelay  
+then M1 becomes eligible at:  
+10:00:50  
+**Correct Recovery**  
+The original accepted retry time was:  
+10:00:30  
+Therefore the WAL must preserve:  
+retryAt = 10:00:30  
+**Mental Model**  
+Persist decisions, not enough information to accidentally make a different
+decision during recovery.

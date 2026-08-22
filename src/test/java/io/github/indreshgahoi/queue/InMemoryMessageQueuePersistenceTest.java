@@ -5,6 +5,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -294,10 +296,300 @@ class InMemoryMessageQueuePersistenceTest {
             );
         }
     }
+    @Test
+    void nackedMessageDoesNotBecomeReadyBeforeRetryTimeAfterRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(Instant.parse("2026-08-21T10:00:00Z"));
+
+        try (InMemoryMessageQueue queue = createQueue(walPath, clock)) {
+            queue.publish("A");
+
+            Delivery delivery = queue.receive().orElseThrow();
+
+            assertTrue(
+                    queue.nack(
+                            delivery.receiptHandle(),
+                            Duration.ofSeconds(30)
+                    )
+            );
+        }
+
+        try (InMemoryMessageQueue recovered = createQueue(walPath, clock)) {
+            assertTrue(recovered.receive().isEmpty());
+
+            assertEquals(
+                    0,
+                    recovered.makeDelayedMessagesReady()
+            );
+        }
+    }
+    @Test
+    void nackedMessageBecomesReadyAtRetryTimeAfterRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(Instant.parse("2026-08-21T10:00:00Z"));
+
+        String messageId;
+
+        try (InMemoryMessageQueue queue = createQueue(walPath, clock)) {
+            messageId = queue.publish("A");
+
+            Delivery delivery = queue.receive().orElseThrow();
+
+            queue.nack(
+                    delivery.receiptHandle(),
+                    Duration.ofSeconds(30)
+            );
+        }
+
+        clock.advance(Duration.ofSeconds(30));
+
+        try (InMemoryMessageQueue recovered = createQueue(walPath, clock)) {
+            assertEquals(
+                    1,
+                    recovered.makeDelayedMessagesReady()
+            );
+
+            Delivery redelivery =
+                    recovered.receive().orElseThrow();
+
+            assertEquals(
+                    messageId,
+                    redelivery.message().id()
+            );
+
+            assertEquals(2, redelivery.attempt());
+        }
+    }
+
+    @Test
+    void nackWalFailureDoesNotRemoveInFlightDelivery() {
+        FailOnNackWal wal = new FailOnNackWal();
+
+        try (
+                InMemoryMessageQueue queue =
+                        new InMemoryMessageQueue(
+                                Clock.systemUTC(),
+                                new QueueConfiguration(),
+                                wal
+                        )
+        ) {
+            queue.publish("A");
+
+            Delivery delivery =
+                    queue.receive().orElseThrow();
+
+            assertThrows(
+                    WalException.class,
+                    () -> queue.nack(
+                            delivery.receiptHandle(),
+                            Duration.ofSeconds(10)
+                    )
+            );
+
+            wal.allowNack();
+
+            // Old ownership must still exist because failed
+            // NACK must not mutate memory.
+            assertTrue(
+                    queue.ack(delivery.receiptHandle())
+            );
+        }
+    }
+
+    @Test
+    void multipleNacksDoNotCreateDuplicateDelayedMessagesAfterRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-22T00:00:00Z")
+                );
+
+        String messageId;
+
+        try (InMemoryMessageQueue queue =
+                     createQueue(walPath, clock)) {
+
+            messageId = queue.publish("A");
+
+            // Attempt 1
+            Delivery first =
+                    queue.receive().orElseThrow();
+
+            assertEquals(1, first.attempt());
+
+            assertTrue(
+                    queue.nack(
+                            first.receiptHandle(),
+                            Duration.ofSeconds(10)
+                    )
+            );
+
+            // Make attempt 2 eligible.
+            clock.advance(Duration.ofSeconds(10));
+
+            assertEquals(
+                    1,
+                    queue.makeDelayedMessagesReady()
+            );
+
+            // Attempt 2
+            Delivery second =
+                    queue.receive().orElseThrow();
+
+            assertEquals(2, second.attempt());
+
+            assertTrue(
+                    queue.nack(
+                            second.receiptHandle(),
+                            Duration.ofSeconds(20)
+                    )
+            );
+        }
+
+        /*
+         * Restart while M1 should have exactly one logical
+         * delayed state:
+         *
+         * M1
+         * nextAttempt = 3
+         * retryAt = currentTime + 20s
+         */
+        try (InMemoryMessageQueue recovered =
+                     createQueue(walPath, clock)) {
+
+            // It must not be READY yet.
+            assertTrue(recovered.receive().isEmpty());
+
+            // Old attempt-2 delayed state must not also exist.
+            assertEquals(
+                    0,
+                    recovered.makeDelayedMessagesReady()
+            );
+
+            clock.advance(Duration.ofSeconds(20));
+
+            /*
+             * Exactly ONE delayed representation of M1
+             * should become READY.
+             */
+            assertEquals(
+                    1,
+                    recovered.makeDelayedMessagesReady()
+            );
+
+            Delivery redelivery =
+                    recovered.receive().orElseThrow();
+
+            assertEquals(
+                    messageId,
+                    redelivery.message().id()
+            );
+            assertEquals(
+                    "A",
+                    redelivery.message().payload()
+            );
+
+            assertEquals(
+                    3,
+                    redelivery.attempt()
+            );
+
+            /*
+             * If recovery accumulated both NACK records as
+             * separate delayed entries, another copy of M1
+             * would now be available.
+             */
+            assertTrue(recovered.receive().isEmpty());
+
+            /*
+             * Running promotion again must also not reveal
+             * another stale delayed copy.
+             */
+            assertEquals(
+                    0,
+                    recovered.makeDelayedMessagesReady()
+            );
+        }
+    }
+
+    @Test
+    void acknowledgedMessageAfterNackDoesNotReappearAfterRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-22T00:00:00Z")
+                );
+
+        String messageId;
+
+        try (InMemoryMessageQueue queue =
+                     createQueue(walPath, clock)){
+              messageId = queue.publish("A");
+
+            // Attempt 1
+            Delivery first =
+                    queue.receive().orElseThrow();
+
+            assertEquals(1, first.attempt());
+
+            assertTrue(
+                    queue.nack(
+                            first.receiptHandle(),
+                            Duration.ofSeconds(10)
+                    )
+            );
+
+            // Make attempt 2 eligible.
+            clock.advance(Duration.ofSeconds(10));
+
+            assertEquals(
+                    1,
+                    queue.makeDelayedMessagesReady()
+            );
+
+            // Attempt 2
+            Delivery second =
+                    queue.receive().orElseThrow();
+
+            assertEquals(2, second.attempt());
+
+            assertTrue(
+                    queue.nack(
+                            second.receiptHandle(),
+                            Duration.ofSeconds(20)
+                    )
+            );
+
+            clock.advance(Duration.ofSeconds(20));
+
+            assertEquals(1,
+                    queue.makeDelayedMessagesReady());
+
+        }
+
+        try (InMemoryMessageQueue queue =
+                     createQueue(walPath, clock)){
+            assertTrue(queue.receive().isEmpty());
+        }
+
+    }
 
     private InMemoryMessageQueue createQueue(Path walPath) {
         return new InMemoryMessageQueue(
                 Clock.systemUTC(),
+                new QueueConfiguration(),
+                new FileWriteAheadLog(walPath)
+        );
+    }
+    private InMemoryMessageQueue createQueue(Path walPath, Clock clock) {
+        return new InMemoryMessageQueue(
+                clock,
                 new QueueConfiguration(),
                 new FileWriteAheadLog(walPath)
         );
@@ -335,4 +627,38 @@ class InMemoryMessageQueuePersistenceTest {
         public void close() {
         }
     }
+    private static final class FailOnNackWal
+            implements WriteAheadLog {
+
+        private final List<WalRecord> records =
+                new ArrayList<>();
+
+        private boolean failNack = true;
+
+        @Override
+        public void append(WalRecord record) {
+            if (record.type() == WalRecordType.NACK && failNack) {
+                throw new WalException(
+                        "Simulated NACK WAL failure"
+                );
+            }
+
+            records.add(record);
+        }
+
+        @Override
+        public List<WalRecord> readAll() {
+            return List.copyOf(records);
+        }
+
+        void allowNack() {
+            failNack = false;
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+
 }

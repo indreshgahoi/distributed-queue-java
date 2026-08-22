@@ -278,16 +278,28 @@ public final class InMemoryMessageQueue
         lock.lock();
 
         try {
-            InFlightMessage inFlight =
-                    inFlightByReceiptHandle
-                            .remove(receiptHandle);
-
+            InFlightMessage inFlight = inFlightByReceiptHandle.get(receiptHandle);
             if (inFlight == null) {
                 return false;
             }
+            Instant retryAt =
+                    clock.instant()
+                            .plus(retryDelay);
+            boolean isMoveToDeadLetter = inFlight.attempt() >= config.maxDeliveryAttempts();
+            wal.append(
+                    new WalRecord(
+                            isMoveToDeadLetter ? WalRecordType.DEAD_LETTER: WalRecordType.NACK,
+                            inFlight.message().id(),
+                            null, // NACK doest need to persist payload
+                            receiptHandle,
+                            inFlight.attempt() + 1,
+                            retryAt
+                    )
+            );
 
-            if (inFlight.attempt()
-                    >= config.maxDeliveryAttempts()) {
+            inFlightByReceiptHandle.remove(receiptHandle);
+
+            if (isMoveToDeadLetter) {
 
                 deadLetters.addLast(
                         inFlight.message()
@@ -296,9 +308,6 @@ public final class InMemoryMessageQueue
                 return true;
             }
 
-            Instant retryAt =
-                    clock.instant()
-                            .plus(retryDelay);
 
             delayed.addLast(
                     new DelayedMessage(
@@ -433,49 +442,141 @@ public final class InMemoryMessageQueue
         }
     }
 
+
     private void recover() {
-        Map<String, QueueMessage> recovered =
+        Map<String, RecoveryState> states =
                 new LinkedHashMap<>();
 
         for (WalRecord record : wal.readAll()) {
-            switch (record.type()) {
-                case PUBLISH -> recovered.put(
-                        record.messageId(),
-                        new QueueMessage(
-                                new Message(
-                                        record.messageId(),
-                                        record.payload()
-                                ),
-                                record.attempt()
-                        )
-                );
 
-                case ACK -> recovered.remove(
-                        record.messageId()
-                );
+            switch (record.type()) {
+
+                case PUBLISH -> {
+                    Message message =
+                            new Message(
+                                    record.messageId(),
+                                    record.payload()
+                            );
+
+                    states.put(
+                            record.messageId(),
+                            new RecoveryState(
+                                    message,
+                                    RecoveryStatus.READY,
+                                    record.attempt(),
+                                    null
+                            )
+                    );
+                }
+
+                case ACK -> {
+                    RecoveryState current =
+                            requireExistingState(
+                                    states,
+                                    record.messageId()
+                            );
+
+                    states.put(
+                            record.messageId(),
+                            new RecoveryState(
+                                    current.message(),
+                                    RecoveryStatus.DONE,
+                                    current.attempt(),
+                                    null
+                            )
+                    );
+                }
+
+                case NACK -> {
+                    RecoveryState current =
+                            requireExistingState(
+                                    states,
+                                    record.messageId()
+                            );
+
+                        states.put(
+                                record.messageId(),
+                                new RecoveryState(
+                                        current.message(),
+                                        RecoveryStatus.DELAYED,
+                                        record.attempt(),
+                                        record.timestamp()
+                                )
+                        );
+
+                }
+                case DEAD_LETTER -> {
+                    RecoveryState current =
+                            requireExistingState(
+                                    states,
+                                    record.messageId()
+                            );
+
+                    states.put(
+                            record.messageId(),
+                            new RecoveryState(
+                                    current.message(),
+                                    RecoveryStatus.DEAD_LETTER,
+                                    record.attempt(),
+                                    null
+                            )
+                    );
+                }
             }
         }
 
-        ready.addAll(recovered.values());
+        materializeRecoveredState(states);
     }
 
-
-    private void recoverPublish(
-            WalRecord record
+    private void materializeRecoveredState(
+            Map<String, RecoveryState> states
     ) {
-        Message message =
-                new Message(
-                        record.messageId(),
-                        record.payload()
+        for (RecoveryState state : states.values()) {
+
+            switch (state.status()) {
+
+                case READY -> ready.addLast(
+                        new QueueMessage(
+                                state.message(),
+                                state.attempt()
+                        )
                 );
 
-        ready.addLast(
-                new QueueMessage(
-                        message,
-                        record.attempt()
-                )
-        );
+                case DELAYED -> delayed.addLast(
+                        new DelayedMessage(
+                                state.message(),
+                                state.attempt(),
+                                state.retryAt()
+                        )
+                );
+
+                case DEAD_LETTER -> deadLetters.addLast(
+                        state.message()
+                );
+
+                case DONE -> {
+                    // Nothing to restore.
+                }
+            }
+        }
     }
+
+    private RecoveryState requireExistingState(
+            Map<String, RecoveryState> states,
+            String messageId
+    ) {
+        RecoveryState state = states.get(messageId);
+
+        if (state == null) {
+            throw new WalException(
+                    "WAL references unknown message: "
+                            + messageId
+            );
+        }
+
+        return state;
+    }
+
 
     @Override
     public void close() {
@@ -487,5 +588,20 @@ public final class InMemoryMessageQueue
         } finally {
             lock.unlock();
         }
+    }
+
+    private enum RecoveryStatus {
+        READY,
+        DELAYED,
+        DEAD_LETTER,
+        DONE
+    }
+
+    private record RecoveryState(
+            Message message,
+            RecoveryStatus status,
+            int attempt,
+            Instant retryAt
+    ) {
     }
 }
