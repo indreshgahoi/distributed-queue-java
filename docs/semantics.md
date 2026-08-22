@@ -636,4 +636,32 @@ If the WAL contains a complete length prefix but fewer payload bytes
 than declared, recovery must recognize the record as incomplete rather
 than decoding it as a valid WAL record.
 
+## Version v0.9.2 — torn-tail recovery policy.
+Now we have framing, which lets us detect:
+```text
+[M1 complete]
+[M2 complete]
+[M3 partial]
+```
+The next question is:
+> When the last WAL is incomplete because of crash, should startup fail completely or should we recover the valid prefix and discard the torn tail?
+
+For this project:
+> Recover all complete frames, ignore/truncate only an incomplete final frame, but fail on corruption in the middle of the WAL.
+
+That give us clear distinction:
+```text
+truncated tail after crash
+→ recoverable
+
+corruption in committed history
+→ fail loudly
+```
+### G71. Recovery may discard an incomplete final WAL frame.
+
+### G72. All complete frames before the incomplete tail remain valid.
+
+### G73. Recovery must never silently skip corruption between valid records.
+
+### G74. After successful tail recovery, the WAL must be truncated to the last complete frame boundary before accepting new writes.
 
