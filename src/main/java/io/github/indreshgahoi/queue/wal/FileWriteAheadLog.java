@@ -1,4 +1,4 @@
-package io.github.indreshgahoi.queue;
+package io.github.indreshgahoi.queue.wal;
 
 import java.io.BufferedReader;
 import java.io.IOException;

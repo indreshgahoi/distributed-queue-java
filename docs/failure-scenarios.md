@@ -282,3 +282,37 @@ The queue must not expose a partially completed transition.
 ### Invariant
 
 A failed durable state transition must leave the previous runtime state intact.
+
+## F11 — Crash During WAL Record Write
+
+### Sequence
+
+1. PUBLISH M1 is durably written.
+2. PUBLISH M2 is durably written.
+3. PUBLISH M3 begins.
+4. The process crashes after only part of M3 reaches the WAL.
+
+The file may contain:
+
+    [M1 complete]
+    [M2 complete]
+    [M3 partial]
+
+### Risk
+
+Without explicit framing, recovery may be unable to determine whether
+the final bytes represent:
+
+- a valid record,
+- an incomplete record,
+- or corrupted data.
+
+### Required Direction
+
+Each WAL entry must carry an explicit record length.
+
+Recovery can therefore distinguish:
+
+    complete frame
+        vs
+    incomplete trailing frame

@@ -535,3 +535,105 @@ Repeated lease expiries, NACKs, ACKs and publishes must fold into one final
 logical state per message.
 
 Recovery must not create duplicate READY or DELAYED representations.
+
+## Version v0.9 — WAL Crash Safety & Corruption Recovery
+
+### Motivation
+So far we've assumed:
+> wal.append(record)  either completely succeeds or completely fails.
+Real storge does not give us such a clean world.
+
+Consider:
+```text
+WAL currently:
+[PUBLISH M1]
+[PUBLISH M2]
+
+Writing:
+[PUBLISH M3........
+                  ↑
+               CRASH
+```
+After restart the file might contain:
+```text
+valid record
+valid record
+partial record
+```
+Now our readAll() now has to answer much harder questions:
+> How do I distinguish a valid record from a partial record?
+
+this is where project start moving from "queue implementation" toward storage-engine thinking.
+
+v0.9 goals
+```text
+v0.9.1  Framed WAL records
+        ↓
+v0.9.2  Detect truncated tail
+        ↓
+v0.9.3  Checksum / corruption detection
+        ↓
+v0.9.4  Recovery policy
+```
+
+**v0.9.1 — WAL record framing**
+Suppose your current encoding is effectively:
+```text
+PUBLISH|M1|payload|...
+PUBLISH|M2|payload|...
+```
+That's easy to inspect, but recovery needs reliable record boundaries.
+Instead introduce a frame:
+┌──────────────┬───────────────────────┐
+│ length       │ encoded WAL record    │
+│ 4 bytes      │ N bytes               │
+└──────────────┴───────────────────────┘
+For example:
+```text
+[length=37][PUBLISH M1 ...]
+[length=42][NACK M2 ...]
+[length=31][ACK M3 ...]
+```
+
+Now recovery can reason:
+read 4-byte length
+↓
+length = 42
+↓
+are 42 bytes available?
+│
+yes ──→ decode record
+│
+no ──→ truncated tail
+
+## Version 0.9.1 — Framed WAL Records
+
+### G68 — WAL Records Have Explicit Boundaries
+
+Every WAL record is stored as an independently framed entry.
+
+A frame consists of:
+
+    [record-length][record-payload]
+
+The record length describes the number of bytes belonging to the
+encoded WAL record.
+
+Recovery must use the frame boundary rather than relying on delimiter
+scanning or end-of-line parsing.
+
+### G69 — Recovery Never Reads Across Record Boundaries
+
+A WAL decoder must consume exactly the number of bytes declared by the
+record frame.
+
+Bytes belonging to a subsequent record must never be interpreted as
+part of the current record.
+
+### G70 — Incomplete Frames Are Detectable
+
+If the WAL contains a complete length prefix but fewer payload bytes
+than declared, recovery must recognize the record as incomplete rather
+than decoding it as a valid WAL record.
+
+

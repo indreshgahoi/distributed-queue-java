@@ -1,6 +1,4 @@
-package io.github.indreshgahoi.queue;
-
-import java.io.IOException;
+package io.github.indreshgahoi.queue.wal;
 
 public class WalException extends RuntimeException {
     public WalException(String message) {

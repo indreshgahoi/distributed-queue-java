@@ -1,5 +1,16 @@
 package io.github.indreshgahoi.queue;
 
+import io.github.indreshgahoi.queue.internal.DelayedMessage;
+import io.github.indreshgahoi.queue.internal.InFlightMessage;
+import io.github.indreshgahoi.queue.internal.QueueMessage;
+import io.github.indreshgahoi.queue.internal.RecoveryState;
+import io.github.indreshgahoi.queue.internal.RecoveryStatus;
+import io.github.indreshgahoi.queue.wal.InMemoryWriteAheadLog;
+import io.github.indreshgahoi.queue.wal.WalException;
+import io.github.indreshgahoi.queue.wal.WalRecord;
+import io.github.indreshgahoi.queue.wal.WalRecordType;
+import io.github.indreshgahoi.queue.wal.WriteAheadLog;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -8,7 +19,6 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -625,18 +635,4 @@ public final class InMemoryMessageQueue
         }
     }
 
-    private enum RecoveryStatus {
-        READY,
-        DELAYED,
-        DEAD_LETTER,
-        DONE
-    }
-
-    private record RecoveryState(
-            Message message,
-            RecoveryStatus status,
-            int attempt,
-            Instant retryAt
-    ) {
-    }
 }

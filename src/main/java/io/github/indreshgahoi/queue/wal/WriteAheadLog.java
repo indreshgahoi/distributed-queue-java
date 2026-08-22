@@ -1,4 +1,5 @@
-package io.github.indreshgahoi.queue;
+package io.github.indreshgahoi.queue.wal;
+
 
 import java.util.List;
 

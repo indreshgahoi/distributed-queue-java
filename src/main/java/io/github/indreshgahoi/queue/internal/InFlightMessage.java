@@ -1,8 +1,10 @@
-package io.github.indreshgahoi.queue;
+package io.github.indreshgahoi.queue.internal;
+
+import io.github.indreshgahoi.queue.Message;
 
 import java.time.Instant;
 
-record InFlightMessage(
+public record InFlightMessage(
         Message message,
         String receiptHandle,
         Instant leaseUntil,
