@@ -42,3 +42,29 @@ This has not yet been measured.
 
 ### Revisit when
 Durability semantics are stable and benchmarks are available.
+
+## v0.10.0 — CRC32C WAL Integrity
+
+### Decision
+
+Add CRC32C to every complete WAL frame.
+
+### Gain
+
+Recovery can detect structurally complete records whose payload bytes have
+been corrupted.
+
+### Cost
+
+Each frame gains 4 bytes and requires checksum computation on write and
+verification during recovery.
+
+The performance impact has not yet been measured.
+
+### Important distinction
+
+Incomplete final frame:
+recoverable torn-tail condition.
+
+Complete frame with checksum mismatch:
+corruption; fail recovery.
