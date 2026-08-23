@@ -335,3 +335,193 @@ detect unsupported format before record recovery begins.
 
 The key mental model is:
 > Data formats are APIs too. Once bytes can survive longer than the process that wrote them, format compatibility becomes an architectural concern.
+
+
+## F14 — Unbounded WAL Growth
+
+### Sequence
+
+The queue runs for a long period.
+
+Messages are continuously:
+
+- published
+- acknowledged
+- retried
+- dead-lettered
+
+Most historical messages are already DONE, but their WAL records remain.
+
+### Result
+
+The WAL grows monotonically.
+
+Recovery time becomes proportional to total historical operations rather
+than current queue state.
+
+Disk consumption also grows without bound.
+
+### Required Direction
+
+Periodically persist a snapshot of the current logical queue state.
+
+Once a snapshot is safely durable, WAL history represented by that snapshot
+may eventually be compacted or discarded according to a defined policy.
+
+## F15 — Delivery Lease Is Lost After Queue Restart
+
+### Initial State
+
+M1 is READY.
+
+### Sequence
+
+1. Consumer calls `receive()`.
+2. Queue removes M1 from READY.
+3. Queue creates:
+
+       receiptHandle = R1
+       attempt = 1
+       leaseUntil = 10:30
+
+4. M1 becomes IN_FLIGHT.
+5. Delivery is returned to the consumer.
+6. Queue process crashes at 10:10.
+7. Queue restarts at 10:12.
+
+### Current Failure Without Durable Delivery State
+
+If the WAL contains only:
+
+    PUBLISH M1
+
+recovery reconstructs:
+
+    M1 -> READY
+
+The same message can therefore be delivered again at 10:12 even though the
+original lease was valid until 10:30.
+
+### Problem
+
+The queue forgot an externally visible ownership decision.
+
+Restart changed delivery semantics.
+
+### Required Behavior
+
+Before exposing the delivery, persist:
+
+    LEASE_STARTED
+    messageId = M1
+    receiptHandle = R1
+    attempt = 1
+    leaseUntil = 10:30
+
+Recovery must restore:
+
+    M1 -> IN_FLIGHT(R1)
+
+until the lease terminates normally.
+
+
+## F16 — Consumer Cannot ACK After Queue Restart
+
+### Sequence
+
+1. Consumer receives M1 with receipt handle R1.
+2. Consumer processes M1 successfully.
+3. Queue process restarts before ACK reaches the queue.
+4. Consumer retries:
+
+       ack(R1)
+
+### Incorrect Policy
+
+If queue restart invalidates all receipt handles:
+
+    ack(R1) -> false
+
+Eventually the lease expires and M1 is redelivered despite successful
+processing.
+
+### Required Behavior
+
+Queue restart alone must not invalidate R1.
+
+If the recovered lease is still active:
+
+    ack(R1) -> true
+
+Receipt-handle validity is tied to the delivery lease, not the lifetime of
+one JVM process.
+
+
+## F17 — receive() Exposes Ownership Before It Is Durable
+
+### Incorrect Ordering
+
+    remove M1 from READY
+        |
+        v
+    create R1
+        |
+        v
+    return Delivery
+        |
+        v
+    append LEASE_STARTED
+
+If the process crashes after returning the delivery but before the WAL append,
+the consumer believes it owns M1 while recovery believes M1 is READY.
+
+### Required Ordering
+
+    identify READY M1
+        |
+        v
+    create R1 + leaseUntil
+        |
+        v
+    append LEASE_STARTED
+        |
+        v
+    cross durability boundary
+        |
+        v
+    READY -> IN_FLIGHT
+        |
+        v
+    return Delivery
+
+### Invariant
+
+Externally visible ownership must never exist only in volatile memory.
+
+
+## F18 — LEASE_STARTED WAL Failure Partially Changes Queue State
+
+### Sequence
+
+1. M1 is READY.
+2. `receive()` begins.
+3. Implementation removes M1 from READY.
+4. LEASE_STARTED WAL append fails.
+
+### Incorrect Result
+
+M1 is no longer READY but no durable delivery lease exists.
+
+The message may effectively disappear until another repair path detects it.
+
+### Required Result
+
+If LEASE_STARTED cannot be made durable:
+
+    M1 remains READY
+    no active receipt handle exists
+    receive() does not return a Delivery
+
+### Principle
+
+A failed durable transition must leave the previous authoritative state intact.

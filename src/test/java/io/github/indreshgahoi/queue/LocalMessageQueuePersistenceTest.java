@@ -1129,12 +1129,667 @@ class LocalMessageQueuePersistenceTest {
         }
     }
 
-    private LocalMessageQueue createQueue(Path walPath) {
-        return new LocalMessageQueue(
-                Clock.systemUTC(),
-                new QueueConfiguration(),
-                new FileWriteAheadLog(walPath)
+    @Test
+    void activeDeliveryLeaseSurvivesQueueRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        String receiptHandle;
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("A");
+
+            Delivery delivery =
+                    queue.receive().orElseThrow();
+
+            receiptHandle =
+                    delivery.receiptHandle();
+
+            assertEquals(1, delivery.attempt());
+        }
+
+        /*
+         * Restart before lease expiry.
+         */
+        clock.advance(
+                config.visibilityTimeout()
+                        .dividedBy(2)
         );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            /*
+             * Restart must not make M1 READY again.
+             */
+            assertTrue(
+                    recovered.receive().isEmpty()
+            );
+
+            /*
+             * Original receipt handle still owns
+             * the active delivery.
+             */
+            assertTrue(
+                    recovered.ack(receiptHandle)
+            );
+
+            assertTrue(
+                    recovered.receive().isEmpty()
+            );
+        }
+    }
+
+    @Test
+    void recoveredActiveLeasePreservesDeliveryAttempt() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        /*
+         * Create attempt 2.
+         */
+        String attemptTwoReceipt;
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("A");
+
+            Delivery first =
+                    queue.receive().orElseThrow();
+
+            assertEquals(1, first.attempt());
+
+            assertTrue(
+                    queue.nack(
+                            first.receiptHandle(),
+                            Duration.ZERO
+                    )
+            );
+
+            assertEquals(
+                    1,
+                    queue.makeDelayedMessagesReady()
+            );
+
+            Delivery second =
+                    queue.receive().orElseThrow();
+
+            assertEquals(2, second.attempt());
+
+            attemptTwoReceipt =
+                    second.receiptHandle();
+        }
+
+        clock.advance(
+                config.visibilityTimeout()
+                        .dividedBy(2)
+        );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            /*
+             * If attempt 2 lease survived correctly,
+             * its ownership token remains valid.
+             */
+            assertTrue(
+                    recovered.ack(
+                            attemptTwoReceipt
+                    )
+            );
+        }
+    }
+
+    @Test
+    void recoveredActiveLeaseCanBeNacked() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        String receiptHandle;
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("A");
+
+            receiptHandle =
+                    queue.receive()
+                            .orElseThrow()
+                            .receiptHandle();
+        }
+
+        clock.advance(
+                config.visibilityTimeout()
+                        .dividedBy(2)
+        );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            assertTrue(
+                    recovered.nack(
+                            receiptHandle,
+                            Duration.ofSeconds(10)
+                    )
+            );
+
+            assertTrue(
+                    recovered.receive().isEmpty()
+            );
+
+            clock.advance(
+                    Duration.ofSeconds(10)
+            );
+
+            assertEquals(
+                    1,
+                    recovered.makeDelayedMessagesReady()
+            );
+
+            Delivery retry =
+                    recovered.receive()
+                            .orElseThrow();
+
+            assertEquals(
+                    2,
+                    retry.attempt()
+            );
+        }
+    }
+
+    @Test
+    void expiredLeaseBecomesReadyAfterRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        String messageId;
+        String oldReceiptHandle;
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            messageId =
+                    queue.publish("A");
+
+            Delivery delivery =
+                    queue.receive().orElseThrow();
+
+            oldReceiptHandle =
+                    delivery.receiptHandle();
+
+            assertEquals(1, delivery.attempt());
+        }
+
+        /*
+         * Queue remains down beyond leaseUntil.
+         */
+        clock.advance(
+                config.visibilityTimeout()
+                        .plusSeconds(1)
+        );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            Delivery redelivery =
+                    recovered.receive()
+                            .orElseThrow();
+
+            assertEquals(
+                    messageId,
+                    redelivery.message().id()
+            );
+
+            assertEquals(
+                    2,
+                    redelivery.attempt()
+            );
+
+            /*
+             * Old lease is gone.
+             */
+            assertFalse(
+                    recovered.ack(
+                            oldReceiptHandle
+                    )
+            );
+        }
+    }
+
+    @Test
+    void leaseExpiringExactlyAtRestartBoundaryBecomesReady() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("A");
+
+            Delivery first =
+                    queue.receive().orElseThrow();
+
+            assertEquals(1, first.attempt());
+        }
+
+        /*
+         * now == leaseUntil
+         */
+        clock.advance(
+                config.visibilityTimeout()
+        );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            Delivery second =
+                    recovered.receive()
+                            .orElseThrow();
+
+            assertEquals(
+                    2,
+                    second.attempt()
+            );
+        }
+    }
+
+    @Test
+    void expiredFinalAttemptMovesToDeadLetterDuringRecovery() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        /*
+         * Reach final delivery attempt.
+         */
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("poison");
+
+            Delivery first =
+                    queue.receive().orElseThrow();
+
+            queue.nack(
+                    first.receiptHandle(),
+                    Duration.ZERO
+            );
+
+            queue.makeDelayedMessagesReady();
+
+            Delivery second =
+                    queue.receive().orElseThrow();
+
+            queue.nack(
+                    second.receiptHandle(),
+                    Duration.ZERO
+            );
+
+            queue.makeDelayedMessagesReady();
+
+            Delivery third =
+                    queue.receive().orElseThrow();
+
+            assertEquals(
+                    config.maxDeliveryAttempts(),
+                    third.attempt()
+            );
+        }
+
+        /*
+         * Final attempt lease expires while queue
+         * is offline.
+         */
+        clock.advance(
+                config.visibilityTimeout()
+                        .plusSeconds(1)
+        );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            assertEquals(
+                    1,
+                    recovered.deadLetterCount()
+            );
+
+            assertTrue(
+                    recovered.receive().isEmpty()
+            );
+        }
+    }
+
+    @Test
+    void leaseStartedWalFailureLeavesMessageReady() {
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        FailOnLeaseStartedWal wal =
+                new FailOnLeaseStartedWal();
+
+        try (LocalMessageQueue queue =
+                     new LocalMessageQueue(
+                             clock,
+                             config,
+                             wal
+                     )) {
+
+            String messageId =
+                    queue.publish("A");
+
+            assertThrows(
+                    WalException.class,
+                    queue::receive
+            );
+
+            /*
+             * Allow LEASE_STARTED persistence now.
+             *
+             * If failed receive() removed A from READY,
+             * this receive would return empty.
+             */
+            wal.allowLeaseStarted();
+
+            Delivery delivery =
+                    queue.receive()
+                            .orElseThrow();
+
+            assertEquals(
+                    messageId,
+                    delivery.message().id()
+            );
+
+            assertEquals(
+                    1,
+                    delivery.attempt()
+            );
+        }
+    }
+
+    @Test
+    void failedLeaseStartedDoesNotCreateActiveReceiptHandle() {
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        FailOnLeaseStartedWal wal =
+                new FailOnLeaseStartedWal();
+
+        try (LocalMessageQueue queue =
+                     new LocalMessageQueue(
+                             clock,
+                             config,
+                             wal
+                     )) {
+
+            queue.publish("A");
+
+            assertThrows(
+                    WalException.class,
+                    queue::receive
+            );
+
+            /*
+             * Once persistence works, A should still
+             * receive its first real delivery attempt.
+             */
+            wal.allowLeaseStarted();
+
+            Delivery delivery =
+                    queue.receive()
+                            .orElseThrow();
+
+            assertEquals(
+                    1,
+                    delivery.attempt()
+            );
+
+            assertTrue(
+                    queue.ack(
+                            delivery.receiptHandle()
+                    )
+            );
+        }
+    }
+
+    @Test
+    void acknowledgedRecoveredLeaseDoesNotReappearOnNextRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        String receiptHandle;
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("A");
+
+            receiptHandle =
+                    queue.receive()
+                            .orElseThrow()
+                            .receiptHandle();
+        }
+
+        clock.advance(
+                config.visibilityTimeout()
+                        .dividedBy(2)
+        );
+
+        /*
+         * Restart #1: restore lease and ACK it.
+         */
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            assertTrue(
+                    recovered.ack(
+                            receiptHandle
+                    )
+            );
+        }
+
+        /*
+         * Restart #2:
+         *
+         * ACK must dominate earlier LEASE_STARTED.
+         */
+        try (LocalMessageQueue recoveredAgain =
+                     createQueue(walPath, clock, config)) {
+
+            assertTrue(
+                    recoveredAgain.receive()
+                            .isEmpty()
+            );
+        }
+    }
+
+    @Test
+    void nackedRecoveredLeaseDoesNotRestoreOldLeaseOnNextRestart() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        String receiptHandle;
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("A");
+
+            receiptHandle =
+                    queue.receive()
+                            .orElseThrow()
+                            .receiptHandle();
+        }
+
+        clock.advance(
+                config.visibilityTimeout()
+                        .dividedBy(2)
+        );
+
+        /*
+         * Restart and transition recovered lease
+         * to DELAYED.
+         */
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            assertTrue(
+                    recovered.nack(
+                            receiptHandle,
+                            Duration.ofSeconds(30)
+                    )
+            );
+        }
+
+        /*
+         * Restart again before retryAt.
+         */
+        try (LocalMessageQueue recoveredAgain =
+                     createQueue(walPath, clock, config)) {
+
+            assertTrue(
+                    recoveredAgain.receive()
+                            .isEmpty()
+            );
+
+            assertFalse(
+                    recoveredAgain.ack(
+                            receiptHandle
+                    )
+            );
+        }
+    }
+
+    @Test
+    void multipleLeaseStartedRecordsFoldToLatestDeliveryState() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        MutableClock clock =
+                new MutableClock(
+                        Instant.parse("2026-08-23T10:00:00Z")
+                );
+
+        QueueConfiguration config =
+                new QueueConfiguration();
+
+        String secondReceipt;
+
+        try (LocalMessageQueue queue =
+                     createQueue(walPath, clock, config)) {
+
+            queue.publish("A");
+
+            Delivery first =
+                    queue.receive().orElseThrow();
+
+            queue.nack(
+                    first.receiptHandle(),
+                    Duration.ZERO
+            );
+
+            queue.makeDelayedMessagesReady();
+
+            Delivery second =
+                    queue.receive().orElseThrow();
+
+            secondReceipt =
+                    second.receiptHandle();
+
+            assertEquals(
+                    2,
+                    second.attempt()
+            );
+        }
+
+        clock.advance(
+                config.visibilityTimeout()
+                        .dividedBy(2)
+        );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(walPath, clock, config)) {
+
+            /*
+             * Latest LEASE_STARTED must be authoritative.
+             */
+            assertTrue(
+                    recovered.ack(
+                            secondReceipt
+                    )
+            );
+
+            assertTrue(
+                    recovered.receive()
+                            .isEmpty()
+            );
+        }
     }
 
     private LocalMessageQueue createQueue(Path walPath, Clock clock) {
@@ -1143,6 +1798,69 @@ class LocalMessageQueuePersistenceTest {
                 new QueueConfiguration(),
                 new FileWriteAheadLog(walPath)
         );
+    }
+
+    private LocalMessageQueue createQueue(
+            Path walPath,
+            MutableClock clock,
+            QueueConfiguration config
+    ) {
+        return new LocalMessageQueue(
+                clock,
+                config,
+                new FileWriteAheadLog(walPath)
+        );
+    }
+    private LocalMessageQueue createQueue(Path walPath) {
+        return new LocalMessageQueue(
+                Clock.systemUTC(),
+                new QueueConfiguration(),
+                new FileWriteAheadLog(walPath)
+        );
+    }
+
+    /*
+     * Test WAL:
+     *
+     * PUBLISH succeeds.
+     * LEASE_STARTED fails until explicitly enabled.
+     */
+    private static final class FailOnLeaseStartedWal
+            implements WriteAheadLog {
+
+        private final List<WalRecord> records =
+                new ArrayList<>();
+
+        private boolean failLeaseStarted = true;
+
+        @Override
+        public void append(
+                WalRecord record
+        ) {
+            if (record.type()
+                    == WalRecordType.LEASE_STARTED
+                    && failLeaseStarted) {
+
+                throw new WalException(
+                        "Simulated LEASE_STARTED WAL failure"
+                );
+            }
+
+            records.add(record);
+        }
+
+        @Override
+        public List<WalRecord> readAll() {
+            return List.copyOf(records);
+        }
+
+        void allowLeaseStarted() {
+            failLeaseStarted = false;
+        }
+
+        @Override
+        public void close() {
+        }
     }
 
     private static final class FailOnSecondLeaseExpiredWal

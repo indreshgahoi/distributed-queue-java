@@ -7,7 +7,9 @@ import java.time.Instant;
 public record RecoveryState(
             Message message,
             RecoveryStatus status,
+            String receiptHandle,
             int attempt,
+            Instant leaseUntil,
             Instant retryAt
     ) {
     }

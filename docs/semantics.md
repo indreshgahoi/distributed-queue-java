@@ -820,3 +820,347 @@ G81. Unknown WAL versions must fail explicitly rather than being
 interpreted using the current decoder.
 
 G82. Opening an existing WAL must not rewrite or duplicate its header.
+
+## Version v0.12.1 — Snapshot foundation.
+This is the right next problem our WAL is now durable, framed, crash-safe, checksummed, and versioned -- 
+**but it grows forever**
+
+current recovery model:
+```text
+PUBLISH M1
+ACK M1
+PUBLISH M2
+NACK M2
+LEASE_EXPIRED M2
+...
+millions of records
+        ↓
+restart
+        ↓
+replay entire WAL from byte 0
+```
+Even if only 100 messages are currently live, recovery may need to process millions of historical transitions.  
+
+The new problem is:
+> Durable history grows with all past operations, while recovery only needs the current logical state plus history after some safe point.  
+v0.12 mental model **introduce snapshot**
+
+```text
+WAL history:
+
+R1 R2 R3 R4 ... R1,000,000
+                    |
+                    v
+                 SNAPSHOT
+
+Snapshot contains current state:
+READY
+DELAYED
+DEAD_LETTER
+attempt metadata
+retryAt
+```
+Then new writes continue:
+```text
+Snapshot at offset X
+        +
+WAL records after X
+```
+Recovery becomes:
+```text
+load snapshot
+      ↓
+restore logical state
+      ↓
+replay WAL records after snapshot position
+      ↓
+materialize queue
+```
+Instead of replay entire lifetime history
+
+G83. A snapshot represents a complete logical queue state at a known WAL position.
+
+G84. A snapshot must become durable before WAL history covered by it
+can be discarded.
+
+G85. Recovery starts from the newest valid snapshot and replays only
+WAL records written after that snapshot.
+
+G86. Creating a snapshot must not change externally visible queue semantics.
+
+G87. If snapshot creation fails, the existing WAL remains sufficient
+for recovery.
+
+G88. A corrupt or incomplete snapshot must never cause valid WAL
+history to be discarded.
+
+```text
+write snapshot
+      ↓
+force snapshot
+      ↓
+establish snapshot as valid
+==============================
+only after this boundary
+      ↓
+compact old WAL
+```
+
+# v0.11.1 — Durable Delivery Lease Start
+
+## Scope
+
+Version 0.11.1 makes delivery ownership durable.
+
+Before this version, `receive()` created the following state only in memory:
+
+- receipt handle
+- delivery attempt
+- lease expiry time
+- IN_FLIGHT ownership
+
+A queue restart could therefore forget that a message had already been delivered.
+
+v0.11.1 persists the delivery lease before exposing the delivery to the consumer.
+
+---
+
+## G83 — Delivery ownership is durable before exposure
+
+`receive()` must persist the delivery lease before returning the delivery to
+the consumer.
+
+Required ordering:
+
+    READY
+      |
+      | choose message
+      v
+    create receiptHandle
+    create leaseUntil
+      |
+      v
+    append LEASE_STARTED to WAL
+      |
+      v
+    durability boundary
+      |
+      v
+    READY -> IN_FLIGHT
+      |
+      v
+    return Delivery
+
+A consumer must never receive a delivery whose ownership exists only in
+volatile memory.
+
+---
+
+## G84 — LEASE_STARTED contains sufficient recovery state
+
+The durable lease record must contain at least:
+
+    messageId
+    receiptHandle
+    attempt
+    leaseUntil
+
+These fields are sufficient to reconstruct the active delivery after restart.
+
+The message payload does not need to be repeated because the original
+PUBLISH record already contains the canonical message data.
+
+---
+
+## G85 — Queue restart does not terminate an active lease
+
+If a queue process restarts while a delivery lease is still valid, recovery
+must restore that delivery as IN_FLIGHT.
+
+Example:
+
+    10:00 receive M1
+          receipt = R1
+          leaseUntil = 10:30
+
+    10:10 queue crashes
+
+    10:12 queue restarts
+
+Recovered state:
+
+    M1 = IN_FLIGHT
+    receiptHandle = R1
+    attempt = 1
+    leaseUntil = 10:30
+
+M1 must not become READY merely because the queue process restarted.
+
+---
+
+## G86 — Receipt handle survives queue restart
+
+A receipt handle belongs to a delivery lease, not to a specific JVM process.
+
+If the lease remains valid after recovery:
+
+    ack(R1)
+
+and:
+
+    nack(R1, retryDelay)
+
+remain valid operations.
+
+The receipt handle becomes invalid only when the delivery terminates through:
+
+- ACK
+- NACK
+- lease expiry
+- DEAD_LETTER transition
+- another explicitly defined terminal ownership transition
+
+---
+
+## G87 — Delivery attempt survives restart
+
+Recovery must preserve the delivery attempt associated with the active lease.
+
+Example:
+
+    M1 attempt = 2
+    receipt = R2
+    leaseUntil = T
+
+After restart:
+
+    attempt remains 2
+
+A restart must not reset the delivery attempt.
+
+---
+
+## G88 — Lease expiry time survives restart
+
+The absolute `leaseUntil` value must be persisted.
+
+Recovery must not recalculate the lease using:
+
+    restartTime + visibilityTimeout
+
+Example:
+
+    receive at 10:00
+    visibilityTimeout = 30 seconds
+    leaseUntil = 10:00:30
+
+    restart at 10:00:20
+
+Correct:
+
+    lease still expires at 10:00:30
+
+Incorrect:
+
+    leaseUntil = 10:00:50
+
+Persist the scheduling decision, not merely the input used to produce it.
+
+---
+
+## G89 — Failed LEASE_STARTED persistence leaves message READY
+
+If the `LEASE_STARTED` WAL append fails:
+
+    receive()
+
+must fail without completing the READY -> IN_FLIGHT transition.
+
+The message must remain READY.
+
+No receipt handle may become active.
+
+No Delivery may be returned to the consumer.
+
+Required behavior:
+
+    generate delivery metadata
+            |
+            v
+    append LEASE_STARTED
+            |
+          failure
+            |
+            v
+    READY remains unchanged
+
+---
+
+## G90 — Recovery reconstructs active IN_FLIGHT ownership
+
+During WAL replay:
+
+    PUBLISH M1
+    LEASE_STARTED M1 R1 attempt=1 leaseUntil=T
+
+must fold into:
+
+    M1 -> IN_FLIGHT
+    receiptHandle = R1
+    attempt = 1
+    leaseUntil = T
+
+Subsequent durable transitions may replace that state:
+
+    ACK
+        -> DONE
+
+    NACK
+        -> DELAYED
+
+    LEASE_EXPIRED
+        -> READY
+
+    DEAD_LETTER
+        -> DEAD_LETTER
+
+Recovery materializes only the final logical state.
+
+---
+
+## G91 — A message has at most one active delivery lease
+
+Recovery must never construct multiple active receipt handles for the same
+logical delivery state.
+
+The WAL fold must produce one authoritative final state per message.
+
+---
+
+## State Model
+
+Normal delivery:
+
+    READY
+      |
+      | receive()
+      | persist LEASE_STARTED
+      v
+    IN_FLIGHT
+      |
+      +---- ACK ------------> DONE
+      |
+      +---- NACK -----------> DELAYED / DEAD_LETTER
+      |
+      +---- lease expiry ---> READY / DEAD_LETTER
+
+
+Restart does not cause a transition:
+
+    IN_FLIGHT
+       |
+       | queue restart
+       v
+    IN_FLIGHT
+
+The active lease remains authoritative until its normal termination condition.

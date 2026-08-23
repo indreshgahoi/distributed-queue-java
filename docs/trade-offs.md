@@ -68,3 +68,105 @@ recoverable torn-tail condition.
 
 Complete frame with checksum mismatch:
 corruption; fail recovery.
+
+## v0.11.1 — Durable Delivery Leases
+
+### Decision
+
+Persist a `LEASE_STARTED` WAL record before exposing a delivery to a consumer.
+
+A lease contains:
+
+    messageId
+    receiptHandle
+    attempt
+    leaseUntil
+
+Active leases are reconstructed across queue restart.
+
+### Benefit
+
+The queue can preserve externally visible delivery ownership across restart.
+
+Without durable lease creation:
+
+    receive
+        |
+        v
+    queue restart
+        |
+        v
+    message becomes READY prematurely
+
+With durable lease creation:
+
+    receive
+        |
+        v
+    persist lease
+        |
+        v
+    queue restart
+        |
+        v
+    restore IN_FLIGHT
+
+This prevents restart itself from changing delivery semantics.
+
+### Cost
+
+`receive()` now includes durable storage work.
+
+Every delivery attempt adds another WAL record.
+
+This may:
+
+- increase receive latency;
+- increase WAL write volume;
+- increase WAL growth rate;
+- increase recovery work.
+
+These effects have not yet been benchmarked.
+
+### Alternative — Immediately Requeue After Restart
+
+Gain:
+
+- simple recovery;
+- no need to persist delivery ownership.
+
+Cost:
+
+- restart becomes implicit lease cancellation;
+- potential premature duplicate delivery;
+- existing consumer ownership is lost.
+
+Rejected.
+
+### Alternative — Preserve Lease Time but Not Receipt Handle
+
+Gain:
+
+- prevents premature redelivery.
+
+Cost:
+
+- old consumer cannot ACK/NACK after queue restart;
+- successfully processed messages may later be redelivered.
+
+Rejected.
+
+### Selected Trade-off
+
+Preserve the complete lease.
+
+This makes the semantic model stronger and more internally consistent at the
+cost of additional durable writes on the receive path.
+
+### Revisit When
+
+Revisit this decision if measurements show that durable lease creation is a
+meaningful throughput or latency bottleneck.
+
+Any optimization must explicitly state whether it preserves the same durability
+contract.

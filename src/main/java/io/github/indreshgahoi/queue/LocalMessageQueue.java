@@ -186,7 +186,7 @@ public final class LocalMessageQueue
 
         try {
             QueueMessage queuedMessage =
-                    ready.pollFirst();
+                    ready.peekFirst();
 
             if (queuedMessage == null) {
                 return Optional.empty();
@@ -200,6 +200,26 @@ public final class LocalMessageQueue
                             .plus(
                                     config.visibilityTimeout()
                             );
+            /*
+             * Persist ownership before exposing or
+             * mutating the runtime queue state.
+             */
+            wal.append(
+                    new WalRecord(
+                            WalRecordType.LEASE_STARTED,
+                            queuedMessage.message().id(),
+                            null,
+                            receiptHandle,
+                            queuedMessage.nextAttempt(),
+                            leaseUntil
+                    )
+            );
+            /*
+             * WAL succeeded.
+             *
+             * We can now commit READY -> IN_FLIGHT.
+             */
+            ready.removeFirst();
 
             InFlightMessage inFlight =
                     new InFlightMessage(
@@ -298,7 +318,7 @@ public final class LocalMessageQueue
             boolean isMoveToDeadLetter = inFlight.attempt() >= config.maxDeliveryAttempts();
             wal.append(
                     new WalRecord(
-                            isMoveToDeadLetter ? WalRecordType.DEAD_LETTER: WalRecordType.NACK,
+                            isMoveToDeadLetter ? WalRecordType.DEAD_LETTER : WalRecordType.NACK,
                             inFlight.message().id(),
                             null, // NACK doest need to persist payload
                             receiptHandle,
@@ -375,7 +395,7 @@ public final class LocalMessageQueue
                  */
 
                 wal.append(new WalRecord(
-                        isMoveToDeadLetter ? WalRecordType.DEAD_LETTER: WalRecordType.LEASE_EXPIRED,
+                        isMoveToDeadLetter ? WalRecordType.DEAD_LETTER : WalRecordType.LEASE_EXPIRED,
                         inFlight.message().id(),
                         null, // NACK doest need to persist payload
                         inFlight.receiptHandle(),
@@ -491,7 +511,29 @@ public final class LocalMessageQueue
                             new RecoveryState(
                                     message,
                                     RecoveryStatus.READY,
+                                    null,
                                     record.attempt(),
+                                    null,
+                                    null
+                            )
+                    );
+                }
+
+                case LEASE_STARTED -> {
+                    RecoveryState current =
+                            requireExistingState(
+                                    states,
+                                    record.messageId()
+                            );
+
+                    states.put(
+                            record.messageId(),
+                            new RecoveryState(
+                                    current.message(),
+                                    RecoveryStatus.IN_FLIGHT,
+                                    record.receiptHandle(),
+                                    record.attempt(),
+                                    record.timestamp(),   // leaseUntil
                                     null
                             )
                     );
@@ -509,7 +551,9 @@ public final class LocalMessageQueue
                             new RecoveryState(
                                     current.message(),
                                     RecoveryStatus.DONE,
+                                    null,
                                     current.attempt(),
+                                    null,
                                     null
                             )
                     );
@@ -522,15 +566,17 @@ public final class LocalMessageQueue
                                     record.messageId()
                             );
 
-                        states.put(
-                                record.messageId(),
-                                new RecoveryState(
-                                        current.message(),
-                                        RecoveryStatus.DELAYED,
-                                        record.attempt(),
-                                        record.timestamp()
-                                )
-                        );
+                    states.put(
+                            record.messageId(),
+                            new RecoveryState(
+                                    current.message(),
+                                    RecoveryStatus.DELAYED,
+                                    null,
+                                    record.attempt(),
+                                    null,
+                                    record.timestamp()
+                            )
+                    );
 
                 }
                 case DEAD_LETTER -> {
@@ -545,7 +591,9 @@ public final class LocalMessageQueue
                             new RecoveryState(
                                     current.message(),
                                     RecoveryStatus.DEAD_LETTER,
+                                    null,
                                     record.attempt(),
+                                    null,
                                     null
                             )
                     );
@@ -562,7 +610,9 @@ public final class LocalMessageQueue
                             new RecoveryState(
                                     current.message(),
                                     RecoveryStatus.READY,
+                                    null,
                                     record.attempt(),
+                                    null,
                                     null
                             )
                     );
@@ -586,6 +636,48 @@ public final class LocalMessageQueue
                                 state.attempt()
                         )
                 );
+
+                case IN_FLIGHT -> {
+                    Instant now = clock.instant();
+
+                    if (state.leaseUntil().isAfter(now)) {
+
+                        inFlightByReceiptHandle.put(
+                                state.receiptHandle(),
+                                new InFlightMessage(
+                                        state.message(),
+                                        state.receiptHandle(),
+                                        state.leaseUntil(),
+                                        state.attempt()
+                                )
+                        );
+
+                    } else {
+
+                        /*
+                         * Lease expired while queue was offline.
+                         *
+                         * Recovery derives the current state.
+                         * It does NOT append a new WAL record.
+                         */
+                        if (state.attempt()
+                                >= config.maxDeliveryAttempts()) {
+
+                            deadLetters.addLast(
+                                    state.message()
+                            );
+
+                        } else {
+
+                            ready.addLast(
+                                    new QueueMessage(
+                                            state.message(),
+                                            state.attempt() + 1
+                                    )
+                            );
+                        }
+                    }
+                }
 
                 case DELAYED -> delayed.addLast(
                         new DelayedMessage(
