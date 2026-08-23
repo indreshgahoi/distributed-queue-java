@@ -316,3 +316,22 @@ Recovery can therefore distinguish:
     complete frame
         vs
     incomplete trailing frame
+
+F13 — New code interprets an old WAL using the wrong physical format
+
+```text
+Old file:
+[length][payload]
+
+New decoder expects:
+[length][payload][checksum]
+```
+
+Without versioning:
+bytes may be misinterpreted as valid framing/checksum data.
+
+Required behavior:
+detect unsupported format before record recovery begins.
+
+The key mental model is:
+> Data formats are APIs too. Once bytes can survive longer than the process that wrote them, format compatibility becomes an architectural concern.
