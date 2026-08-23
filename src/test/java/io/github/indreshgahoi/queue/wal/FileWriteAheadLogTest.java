@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
+import java.util.zip.CRC32C;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -256,7 +257,7 @@ class FileWriteAheadLogTest {
     // ---------------------------------------------------------------------
 
     @Test
-    void walRecordIsPrefixedWithItsPayloadLength()
+    void walRecordLengthPrefixMatchesPayloadLength()
             throws IOException {
 
         Path walPath = tempDir.resolve("queue.wal");
@@ -288,7 +289,7 @@ class FileWriteAheadLogTest {
                 buffer.getInt();
 
         int actualPayloadLength =
-                fileBytes.length - Integer.BYTES;
+                fileBytes.length - Integer.BYTES -Integer.BYTES;
 
         assertEquals(
                 actualPayloadLength,
@@ -297,22 +298,17 @@ class FileWriteAheadLogTest {
     }
 
     @Test
-    void multipleRecordsAreStoredAsIndependentLengthPrefixedFrames()
+    void multipleRecordsHaveIndependentFramedBoundaries()
             throws IOException {
 
-        Path walPath = tempDir.resolve("queue.wal");
+        Path walPath =
+                tempDir.resolve("queue.wal");
 
         WalRecord first =
-                publishRecord(
-                        "message-1",
-                        "A"
-                );
+                publishRecord("message-1", "A");
 
         WalRecord second =
-                publishRecord(
-                        "message-2",
-                        "B"
-                );
+                publishRecord("message-2", "B");
 
         try (WriteAheadLog wal =
                      new FileWriteAheadLog(walPath)) {
@@ -327,30 +323,60 @@ class FileWriteAheadLogTest {
         ByteBuffer buffer =
                 ByteBuffer.wrap(bytes);
 
-        int firstLength =
-                buffer.getInt();
-
-        assertTrue(firstLength > 0);
+        /*
+         * Frame 1
+         */
         assertTrue(
-                buffer.remaining() >= firstLength
+                buffer.remaining() >= Integer.BYTES
         );
 
+        int firstPayloadLength =
+                buffer.getInt();
+
+        assertTrue(firstPayloadLength > 0);
+
+        assertTrue(
+                buffer.remaining()
+                        >= firstPayloadLength
+                        + Integer.BYTES
+        );
+
+        /*
+         * Skip payload1.
+         */
         buffer.position(
-                buffer.position() + firstLength
+                buffer.position()
+                        + firstPayloadLength
         );
 
+        /*
+         * Skip checksum1.
+         */
+        buffer.position(
+                buffer.position()
+                        + Integer.BYTES
+        );
+
+        /*
+         * Frame 2
+         */
         assertTrue(
-                buffer.remaining() >= Integer.BYTES,
-                "Second frame must contain its own length prefix"
+                buffer.remaining() >= Integer.BYTES
         );
 
-        int secondLength =
+        int secondPayloadLength =
                 buffer.getInt();
 
-        assertTrue(secondLength > 0);
+        assertTrue(secondPayloadLength > 0);
 
+        /*
+         * What remains must be exactly:
+         *
+         * payload2 + checksum2
+         */
         assertEquals(
-                secondLength,
+                secondPayloadLength
+                        + Integer.BYTES,
                 buffer.remaining()
         );
     }
@@ -383,7 +409,7 @@ class FileWriteAheadLogTest {
                 buffer.getInt();
 
         assertEquals(
-                bytes.length - Integer.BYTES,
+                bytes.length - Integer.BYTES - Integer.BYTES,
                 frameLength
         );
 
@@ -867,6 +893,383 @@ class FileWriteAheadLogTest {
                     reopened.readAll()
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Corruption / Checksum
+    // ---------------------------------------------------------------------
+    @Test
+    void walFrameContainsChecksum()
+            throws IOException {
+
+        Path walPath =
+                tempDir.resolve("queue.wal");
+
+        WalRecord record =
+                publishRecord(
+                        "message-1",
+                        "hello"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(record);
+        }
+
+        byte[] bytes =
+                Files.readAllBytes(walPath);
+
+        ByteBuffer buffer =
+                ByteBuffer.wrap(bytes);
+
+        int payloadLength =
+                buffer.getInt();
+
+        /*
+         * Existing v0.9.3 format:
+         *
+         * 4-byte length
+         * +
+         * payload
+         *
+         * v0.10.0 requires another 4-byte checksum.
+         */
+        assertEquals(
+                Integer.BYTES
+                        + payloadLength
+                        + Integer.BYTES,
+                bytes.length
+        );
+    }
+
+    @Test
+    void storedChecksumMatchesPayload()
+            throws IOException {
+
+        Path walPath =
+                tempDir.resolve("queue.wal");
+
+        WalRecord record =
+                publishRecord(
+                        "message-1",
+                        "hello"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(record);
+        }
+
+        byte[] bytes =
+                Files.readAllBytes(walPath);
+
+        ByteBuffer buffer =
+                ByteBuffer.wrap(bytes);
+
+        int payloadLength =
+                buffer.getInt();
+
+        byte[] payload =
+                new byte[payloadLength];
+
+        buffer.get(payload);
+
+        int storedChecksum =
+                buffer.getInt();
+
+        CRC32C crc =
+                new CRC32C();
+
+        crc.update(
+                payload,
+                0,
+                payload.length
+        );
+
+        int expectedChecksum =
+                (int) crc.getValue();
+
+        assertEquals(
+                expectedChecksum,
+                storedChecksum
+        );
+    }
+
+    @Test
+    void corruptedPayloadIsDetectedByChecksum()
+            throws IOException {
+
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord record =
+                publishRecord(
+                        "message-1",
+                        "hello"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(record);
+        }
+
+        /*
+         * Physical frame:
+         *
+         * [4-byte length][payload][4-byte checksum]
+         *
+         * Corrupt exactly one payload byte while leaving
+         * the checksum untouched.
+         */
+        try (FileChannel channel =
+                     FileChannel.open(
+                             walPath,
+                             StandardOpenOption.READ,
+                             StandardOpenOption.WRITE
+                     )) {
+
+            ByteBuffer lengthBuffer =
+                    ByteBuffer.allocate(Integer.BYTES);
+
+            channel.read(lengthBuffer);
+            lengthBuffer.flip();
+
+            int payloadLength =
+                    lengthBuffer.getInt();
+
+            assertTrue(payloadLength > 0);
+
+            /*
+             * Position now points to first payload byte.
+             */
+            long payloadPosition =
+                    Integer.BYTES;
+
+            channel.position(payloadPosition);
+
+            ByteBuffer oneByte =
+                    ByteBuffer.allocate(1);
+
+            assertEquals(
+                    1,
+                    channel.read(oneByte)
+            );
+
+            oneByte.flip();
+
+            byte original =
+                    oneByte.get();
+
+            byte corrupted =
+                    (byte) (original ^ 0x01);
+
+            channel.position(payloadPosition);
+
+            ByteBuffer replacement =
+                    ByteBuffer.wrap(
+                            new byte[]{corrupted}
+                    );
+
+            while (replacement.hasRemaining()) {
+                channel.write(replacement);
+            }
+        }
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            assertThrows(
+                    WalException.class,
+                    wal::readAll
+            );
+        }
+    }
+    @Test
+    void corruptedStoredChecksumIsDetected()
+            throws IOException {
+
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord record =
+                publishRecord(
+                        "message-1",
+                        "hello"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(record);
+        }
+
+        try (FileChannel channel =
+                     FileChannel.open(
+                             walPath,
+                             StandardOpenOption.READ,
+                             StandardOpenOption.WRITE
+                     )) {
+
+            ByteBuffer lengthBuffer =
+                    ByteBuffer.allocate(Integer.BYTES);
+
+            channel.read(lengthBuffer);
+            lengthBuffer.flip();
+
+            int payloadLength =
+                    lengthBuffer.getInt();
+
+            long checksumPosition =
+                    Integer.BYTES
+                            + payloadLength;
+
+            channel.position(checksumPosition);
+
+            ByteBuffer checksumBuffer =
+                    ByteBuffer.allocate(Integer.BYTES);
+
+            channel.read(checksumBuffer);
+            checksumBuffer.flip();
+
+            int checksum =
+                    checksumBuffer.getInt();
+
+            int corruptedChecksum =
+                    checksum ^ 0x01;
+
+            channel.position(checksumPosition);
+
+            ByteBuffer replacement =
+                    ByteBuffer.allocate(Integer.BYTES);
+
+            replacement.putInt(corruptedChecksum);
+            replacement.flip();
+
+            while (replacement.hasRemaining()) {
+                channel.write(replacement);
+            }
+        }
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            assertThrows(
+                    WalException.class,
+                    wal::readAll
+            );
+        }
+    }
+    @Test
+    void checksumMismatchIsNotTreatedAsRecoverableTornTail()
+            throws IOException {
+
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord first =
+                publishRecord(
+                        "message-1",
+                        "A"
+                );
+
+        WalRecord second =
+                publishRecord(
+                        "message-2",
+                        "B"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(first);
+            wal.append(second);
+        }
+
+        long sizeBeforeCorruption =
+                Files.size(walPath);
+
+        /*
+         * Corrupt one byte inside second record's payload.
+         */
+        try (FileChannel channel =
+                     FileChannel.open(
+                             walPath,
+                             StandardOpenOption.READ,
+                             StandardOpenOption.WRITE
+                     )) {
+
+            ByteBuffer firstLengthBuffer =
+                    ByteBuffer.allocate(Integer.BYTES);
+
+            channel.read(firstLengthBuffer);
+            firstLengthBuffer.flip();
+
+            int firstPayloadLength =
+                    firstLengthBuffer.getInt();
+
+            long secondFrameStart =
+                    Integer.BYTES
+                            + firstPayloadLength
+                            + Integer.BYTES;
+
+            channel.position(secondFrameStart);
+
+            ByteBuffer secondLengthBuffer =
+                    ByteBuffer.allocate(Integer.BYTES);
+
+            channel.read(secondLengthBuffer);
+            secondLengthBuffer.flip();
+
+            int secondPayloadLength =
+                    secondLengthBuffer.getInt();
+
+            assertTrue(secondPayloadLength > 0);
+
+            long secondPayloadStart =
+                    secondFrameStart
+                            + Integer.BYTES;
+
+            channel.position(secondPayloadStart);
+
+            ByteBuffer oneByte =
+                    ByteBuffer.allocate(1);
+
+            channel.read(oneByte);
+            oneByte.flip();
+
+            byte original =
+                    oneByte.get();
+
+            channel.position(secondPayloadStart);
+
+            channel.write(
+                    ByteBuffer.wrap(
+                            new byte[]{
+                                    (byte) (original ^ 0x01)
+                            }
+                    )
+            );
+        }
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            assertThrows(
+                    WalException.class,
+                    wal::readAll
+            );
+        }
+
+        /*
+         * Very important:
+         *
+         * checksum corruption must NOT cause automatic
+         * WAL truncation.
+         */
+        assertEquals(
+                sizeBeforeCorruption,
+                Files.size(walPath)
+        );
     }
 
     private void appendPartialFrame(

@@ -569,9 +569,9 @@ v0.9 goals
 ```text
 v0.9.1  Framed WAL records
         ↓
-v0.9.2  Detect truncated tail
+v0.9.2/9.3  Detect truncated tail
         ↓
-v0.9.3  Checksum / corruption detection
+v0.10  Checksum / corruption detection
         ↓
 v0.9.4  Recovery policy
 ```
@@ -665,3 +665,106 @@ corruption in committed history
 
 ### G74. After successful tail recovery, the WAL must be truncated to the last complete frame boundary before accepting new writes.
 
+## Version v0.10 — WAL Integrity with CRC32C
+We solved the structural integrity with framing:
+```text
+[length][payload]
+```
+This detects torn write.
+But there is still failure you can't detect.
+Suppose the complete record is.
+```text
+[length = 100][100 payload bytes]
+```
+one byte is corrupted
+```text
+Before:
+[length=100][... A B C D E ...]
+
+After:
+[length=100][... A X C D E ...]
+                  ↑
+               corruption
+```
+From framing perspective everything looks perfect:
+```text
+length = 100 ✓
+100 bytes available ✓
+```
+Depending on which byte changed. deserialization may even succeed. 
+That's dangerous because we could recover **incorrect state without knowing it**.
+so we are introducing:
+```text
+┌────────────┬─────────────┬──────────────┐
+│ Length     │ Payload     │ Checksum     │
+│ 4 bytes    │ N bytes     │ 4 bytes      │
+└────────────┴─────────────┴──────────────┘
+```
+The write path becomes:
+```text
+WalRecord
+   ↓
+serialize
+   ↓
+payload bytes
+   ↓
+CRC32C(payload)
+   ↓
+[length][payload][checksum]
+   ↓
+writeFully
+   ↓
+force
+```
+Recovery:
+```text
+read length
+    ↓
+read N payload bytes
+    ↓
+read checksum
+    ↓
+calculate CRC32C(payload)
+    ↓
+       match?
+      /      \
+    yes       no
+     ↓         ↓
+deserialize   CORRUPTION
+              fail recovery
+```
+## v0.10.0 — WAL Record Integrity
+
+### G73 — Every complete WAL frame carries an integrity checksum
+
+Each WAL frame contains:
+
+    [payload-length][payload][CRC32C]
+
+The checksum is calculated from the payload bytes.
+
+### G74 — Recovery verifies integrity before deserialization
+
+Recovery MUST verify the stored CRC32C against the checksum calculated
+from the recovered payload before interpreting the payload as a WalRecord.
+
+### G75 — Checksum mismatch is corruption
+
+A structurally complete frame whose checksum does not match its payload
+is treated as WAL corruption.
+
+Recovery MUST fail with WalException.
+
+### G76 — Corruption must not be silently repaired
+
+A checksum mismatch MUST NOT be treated as a torn final frame.
+
+Recovery MUST NOT silently truncate a complete frame solely because its
+checksum is invalid.
+
+### G77 — Torn-tail recovery remains supported
+
+An incomplete final frame remains recoverable using the existing
+torn-tail policy.
+
+Complete valid frames before the torn tail are preserved.

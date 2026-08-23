@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
+import java.util.zip.CRC32C;
 
 public final class FileWriteAheadLog
         implements WriteAheadLog {
@@ -18,12 +19,14 @@ public final class FileWriteAheadLog
     /*
      * Physical WAL frame:
      *
-     * +----------------------+----------------------+
-     * | payload length       | serialized record    |
-     * | 4 bytes              | N bytes              |
-     * +----------------------+----------------------+
+     * +----------------------+----------------------+-----------------
+     * | payload length       | serialized record    |  Checksum      |
+     * | 4 bytes              | N bytes              |  4 bytes       |
+     * +----------------------+----------------------+-----------------
      */
     private static final int LENGTH_PREFIX_BYTES =
+            Integer.BYTES;
+    private static final int LENGTH_CHECKSUM =
             Integer.BYTES;
 
     /*
@@ -126,6 +129,15 @@ public final class FileWriteAheadLog
 
         validateRecordSize(payload.length);
 
+        CRC32C crc32c = new CRC32C();
+
+        crc32c.update(
+                payload,
+                0,
+                payload.length);
+
+        int checksum = (int) crc32c.getValue();
+
         /*
          * Build:
          *
@@ -135,10 +147,12 @@ public final class FileWriteAheadLog
                 ByteBuffer.allocate(
                         LENGTH_PREFIX_BYTES
                                 + payload.length
+                                + LENGTH_CHECKSUM
                 );
 
         frame.putInt(payload.length);
         frame.put(payload);
+        frame.putInt(checksum);
 
         /*
          * Switch from writing into the ByteBuffer
@@ -280,6 +294,60 @@ public final class FileWriteAheadLog
                     );
 
                     break;
+                }
+
+                ByteBuffer checksumBuffer =
+                        ByteBuffer.allocate(
+                                LENGTH_CHECKSUM
+                        );
+
+                ReadResult checksumResult =
+                        readFully(
+                                recoveryChannel,
+                                checksumBuffer
+                        );
+                if (!checksumResult.complete()) {
+                    truncateTail(
+                            recoveryChannel,
+                            frameStart
+
+                    );
+                    break;
+                }
+                checksumBuffer.flip();
+
+                int storedChecksum =
+                        checksumBuffer.getInt();
+
+                /*
+                 * Calculate CRC32C over exactly the payload
+                 * bytes that were read from disk.
+                 */
+                CRC32C crc32c =
+                        new CRC32C();
+
+                crc32c.update(
+                        payloadBuffer.array(),
+                        0,
+                        payloadLength
+                );
+
+                int calculatedChecksum =
+                        (int) crc32c.getValue();
+
+                /*
+                 * The frame is structurally complete, but its
+                 * contents failed integrity verification.
+                 *
+                 * This is corruption.
+                 *
+                 * IMPORTANT:
+                 * Do NOT truncate the WAL here.
+                 */
+                if (calculatedChecksum != storedChecksum) {
+                    throw new WalException(
+                            "WAL checksum mismatch"
+                    );
                 }
 
                 payloadBuffer.flip();
