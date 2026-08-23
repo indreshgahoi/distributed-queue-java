@@ -170,3 +170,105 @@ meaningful throughput or latency bottleneck.
 
 Any optimization must explicitly state whether it preserves the same durability
 contract.
+
+## v0.12.1 — Snapshot WAL Position: Segment ID + Offset
+
+### Decision
+
+Represent snapshot recovery position as:
+
+    WalPosition(segmentId, offset)
+
+The current single-file WAL uses:
+
+    segmentId = 0
+
+### Why
+
+A bare byte offset works for a single WAL file but becomes ambiguous once the
+WAL is segmented.
+
+Using a segment ID preserves direct physical replay semantics while allowing
+the WAL to evolve toward:
+
+    segment-N.wal
+
+without changing the snapshot-position contract.
+
+### Gain
+
+- Direct mapping to FileChannel seeking.
+- Clear physical recovery location.
+- Future WAL segmentation fits naturally.
+- Avoids prematurely introducing logical sequence numbering.
+- Snapshot recovery remains simple.
+
+### Cost
+
+- Position is coupled to physical storage layout.
+- Segment lifecycle rules will eventually be required.
+- Compaction may need position translation or segment-retention rules.
+- Does not solve logical ordering across replicated nodes.
+
+### Alternative — Bare Byte Offset
+
+Simpler today:
+
+    offset = 12480
+
+Rejected because the value becomes ambiguous with multiple WAL files.
+
+### Alternative — Logical Sequence Number
+
+Example:
+
+    sequence = 10948
+
+Advantages:
+
+- independent of physical WAL layout;
+- potentially useful for replication and distributed ordering.
+
+Costs:
+
+- requires sequence allocation semantics;
+- requires mapping sequence numbers back to physical storage;
+- introduces machinery not needed for current local recovery.
+
+Deferred until the architecture requires logical-log identity.
+
+### Current Constraint
+
+The implementation currently supports one WAL segment only.
+
+Therefore:
+
+    segmentId = 0
+
+No segmentation behavior should be added merely because the abstraction
+contains a segment identifier.
+
+### Concurrency Trade-off
+
+The snapshot state and WalPosition must be captured consistently.
+
+Current choice:
+
+    briefly hold the queue state lock
+    capture state + durable WalPosition
+    release lock
+    write snapshot outside the lock
+
+This may briefly pause queue mutations during snapshot capture.
+
+The duration and contention impact have not yet been measured.
+
+### Revisit When
+
+Revisit when:
+
+- snapshot copying becomes expensive;
+- lock contention is measured;
+- WAL segmentation is implemented;
+- dedicated WAL writer/group commit is introduced;
+- distributed replication requires logical log indexes.

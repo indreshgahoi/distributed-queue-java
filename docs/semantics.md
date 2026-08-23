@@ -1164,3 +1164,126 @@ Restart does not cause a transition:
     IN_FLIGHT
 
 The active lease remains authoritative until its normal termination condition.
+
+v0.12.1 — Snapshot semantics and state model.
+The key principle is:
+A snapshot is a durable image of the queue’s logical state at a specific WAL position.
+
+So a snapshot must answer two questions:
+1. What is the queue state?
+2. Up to which WAL record/offset does this state already include history?
+   For your queue, the snapshot should capture the current logical state:
+   READY
+- message
+- nextAttempt
+
+IN_FLIGHT
+- message
+- receiptHandle
+- attempt
+- leaseUntil
+
+DELAYED
+- message
+- nextAttempt
+- retryAt
+
+DEAD_LETTER
+- message
+  DONE messages do not need to be stored because they no longer belong to active queue state.
+  The recovery model becomes:
+  load latest valid snapshot
+  ↓
+  restore READY / IN_FLIGHT / DELAYED / DLQ
+  ↓
+  find snapshot WAL position
+  ↓
+  replay WAL records AFTER that position
+  ↓
+  fold to final logical state
+  ↓
+  apply current-time rules for leases
+  ↓
+  materialize runtime queue
+  That WAL position is critical. Suppose:
+  WAL:
+
+R1 PUBLISH M1
+R2 LEASE_STARTED M1
+R3 PUBLISH M2
+R4 ACK M1
+R5 PUBLISH M3
+If snapshot was taken after R3, it represents:
+snapshotWalPosition = R3
+Recovery must do:
+snapshot
++
+replay R4, R5
+
+## v0.12.1 — Snapshot Semantics
+
+### G92 — Snapshot represents complete logical queue state
+
+A snapshot contains all non-terminal queue state required to recover:
+
+- READY
+- IN_FLIGHT
+- DELAYED
+- DEAD_LETTER
+
+DONE messages are omitted.
+
+### G93 — Snapshot is associated with a WAL position
+
+Every snapshot records the WAL position up to which its state is complete.
+
+Recovery must replay only WAL records after that position.
+
+### G94 — Active leases are preserved
+
+IN_FLIGHT snapshot entries preserve:
+
+- message
+- receiptHandle
+- attempt
+- leaseUntil
+
+Queue restart does not invalidate an active lease.
+
+### G95 — Expired leases are derived during recovery
+
+If an IN_FLIGHT lease stored in the snapshot has expired by recovery time:
+
+- move to READY(nextAttempt), or
+- DEAD_LETTER if max attempts are exhausted.
+
+Recovery does not write new WAL history for this derived transition.
+
+### G96 — Retry schedule survives snapshot recovery
+
+DELAYED entries preserve the absolute `retryAt`.
+
+Restart must not reset retry delay.
+
+### G97 — Snapshot creation must not change queue semantics
+
+Taking a snapshot must not:
+
+- consume a message;
+- invalidate a receipt handle;
+- change attempts;
+- alter ordering;
+- change retry times.
+
+### G98 — Failed snapshot creation cannot replace the last valid recovery point
+
+The existing WAL and previous valid snapshot must remain sufficient for recovery if creation of a new snapshot fails.
+
+
+> The next design question is the important one:  
+How do we identify the WAL position represented by the snapshot?
+```text
+There are two reasonable choices for our local WAL:
+A. byte offset
+B. monotonically increasing WAL sequence number
+```

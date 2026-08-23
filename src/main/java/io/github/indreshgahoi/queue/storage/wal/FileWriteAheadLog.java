@@ -1,5 +1,7 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.WalPosition;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -604,6 +606,23 @@ public final class FileWriteAheadLog
         if (failed) {
             throw new WalException(
                     "WAL is in failed state; close and reopen it to recover"
+            );
+        }
+    }
+
+    @Override
+    public synchronized WalPosition currentDurablePosition() {
+        ensureOpen();
+
+        try {
+            return new WalPosition(
+                    0,
+                    appendChannel.size()
+            );
+        } catch (IOException e) {
+            throw new WalException(
+                    "Failed to read current WAL position",
+                    e
             );
         }
     }

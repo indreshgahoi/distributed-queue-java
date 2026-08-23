@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue;
 
+import io.github.indreshgahoi.queue.storage.WalPosition;
 import io.github.indreshgahoi.queue.storage.wal.FileWriteAheadLog;
 import io.github.indreshgahoi.queue.storage.wal.WalException;
 import io.github.indreshgahoi.queue.storage.wal.WalRecord;
@@ -213,6 +214,11 @@ class LocalMessageQueuePersistenceTest {
             @Override
             public java.util.List<WalRecord> readAll() {
                 return java.util.List.of();
+            }
+
+            @Override
+            public WalPosition currentDurablePosition() {
+                return null;
             }
 
             @Override
@@ -1854,6 +1860,11 @@ class LocalMessageQueuePersistenceTest {
             return List.copyOf(records);
         }
 
+        @Override
+        public WalPosition currentDurablePosition() {
+            return null;
+        }
+
         void allowLeaseStarted() {
             failLeaseStarted = false;
         }
@@ -1896,6 +1907,11 @@ class LocalMessageQueuePersistenceTest {
             return List.copyOf(records);
         }
 
+        @Override
+        public WalPosition currentDurablePosition() {
+            return null;
+        }
+
         void allowLeaseExpired() {
             failureEnabled = false;
         }
@@ -1929,6 +1945,11 @@ class LocalMessageQueuePersistenceTest {
         @Override
         public List<WalRecord> readAll() {
             return List.copyOf(records);
+        }
+
+        @Override
+        public WalPosition currentDurablePosition() {
+            return null;
         }
 
         void allowLeaseExpired() {
@@ -1965,6 +1986,11 @@ class LocalMessageQueuePersistenceTest {
             return List.copyOf(records);
         }
 
+        @Override
+        public WalPosition currentDurablePosition() {
+            return null;
+        }
+
         void allowAck() {
             failAck = false;
         }
@@ -1998,6 +2024,11 @@ class LocalMessageQueuePersistenceTest {
             return List.copyOf(records);
         }
 
+        @Override
+        public WalPosition currentDurablePosition() {
+            return null;
+        }
+
         void allowNack() {
             failNack = false;
         }
@@ -2029,6 +2060,11 @@ class LocalMessageQueuePersistenceTest {
         @Override
         public List<WalRecord> readAll() {
             return List.copyOf(records);
+        }
+
+        @Override
+        public WalPosition currentDurablePosition() {
+            return null;
         }
 
         void allowLeaseExpiry() {

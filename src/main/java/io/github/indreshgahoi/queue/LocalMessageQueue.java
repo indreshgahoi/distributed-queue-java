@@ -5,6 +5,12 @@ import io.github.indreshgahoi.queue.internal.InFlightMessage;
 import io.github.indreshgahoi.queue.internal.QueueMessage;
 import io.github.indreshgahoi.queue.internal.RecoveryState;
 import io.github.indreshgahoi.queue.internal.RecoveryStatus;
+import io.github.indreshgahoi.queue.storage.WalPosition;
+import io.github.indreshgahoi.queue.storage.snapshot.DeadLetterSnapshotEntry;
+import io.github.indreshgahoi.queue.storage.snapshot.DelayedSnapshotEntry;
+import io.github.indreshgahoi.queue.storage.snapshot.InFlightSnapshotEntry;
+import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshot;
+import io.github.indreshgahoi.queue.storage.snapshot.ReadySnapshotEntry;
 import io.github.indreshgahoi.queue.storage.wal.InMemoryWriteAheadLog;
 import io.github.indreshgahoi.queue.storage.wal.WalException;
 import io.github.indreshgahoi.queue.storage.wal.WalRecord;
@@ -19,6 +25,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -484,6 +491,65 @@ public final class LocalMessageQueue
 
         try {
             return deadLetters.size();
+
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public QueueSnapshot captureSnapshot() {
+        lock.lock();
+
+        try {
+            WalPosition position =
+                    wal.currentDurablePosition();
+
+            List<ReadySnapshotEntry> readySnapshot =
+                    ready.stream()
+                            .map(q -> new ReadySnapshotEntry(
+                                    q.message().id(),
+                                    q.message().payload(),
+                                    q.nextAttempt()
+                            ))
+                            .toList();
+
+            List<InFlightSnapshotEntry> inFlightSnapshot =
+                    inFlightByReceiptHandle.values()
+                            .stream()
+                            .map(inFlight -> new InFlightSnapshotEntry(
+                                    inFlight.message().id(),
+                                    inFlight.message().payload(),
+                                    inFlight.receiptHandle(),
+                                    inFlight.attempt(),
+                                    inFlight.leaseUntil()
+                            ))
+                            .toList();
+
+            List<DelayedSnapshotEntry> delayedSnapshot =
+                    delayed.stream()
+                            .map(d -> new DelayedSnapshotEntry(
+                                    d.message().id(),
+                                    d.message().payload(),
+                                    d.nextAttempt(),
+                                    d.retryAt()
+                            ))
+                            .toList();
+
+            List<DeadLetterSnapshotEntry> deadLetterSnapshot =
+                    deadLetters.stream()
+                            .map(m -> new DeadLetterSnapshotEntry(
+                                    m.id(),
+                                    m.payload()
+                            ))
+                            .toList();
+
+            return new QueueSnapshot(
+                    position,
+                    readySnapshot,
+                    inFlightSnapshot,
+                    delayedSnapshot,
+                    deadLetterSnapshot
+            );
 
         } finally {
             lock.unlock();
