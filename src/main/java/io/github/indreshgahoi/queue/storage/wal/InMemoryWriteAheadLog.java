@@ -24,6 +24,11 @@ public class InMemoryWriteAheadLog implements WriteAheadLog {
     }
 
     @Override
+    public List<WalRecord> readFrom(WalPosition position) {
+        return List.of();
+    }
+
+    @Override
     public void close() {
 
     }

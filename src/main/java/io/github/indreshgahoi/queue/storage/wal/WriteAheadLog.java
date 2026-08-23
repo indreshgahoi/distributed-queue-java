@@ -13,6 +13,8 @@ public interface WriteAheadLog extends AutoCloseable {
 
     WalPosition currentDurablePosition();
 
+    List<WalRecord> readFrom(WalPosition position);
+
     @Override
     void close();
 }

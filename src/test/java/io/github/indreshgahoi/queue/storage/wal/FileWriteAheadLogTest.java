@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.WalPosition;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -334,7 +335,6 @@ class FileWriteAheadLogTest {
 
         ByteBuffer buffer =
                 ByteBuffer.wrap(bytes);
-
 
 
         assertTrue(
@@ -1574,6 +1574,391 @@ class FileWriteAheadLogTest {
                         .contains("Incomplete WAL header")
         );
     }
+
+    //--------------------------------------------
+    //  Test Cases for reading from WAL position
+    //---------------------------------------------
+    @Test
+    void readFromWalHeaderReturnsAllRecords() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord first =
+                publishRecord("message-1", "A");
+
+        WalRecord second =
+                publishRecord("message-2", "B");
+
+        WalRecord third =
+                publishRecord("message-3", "C");
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(first);
+            wal.append(second);
+            wal.append(third);
+
+            /*
+             * First WAL record begins immediately
+             * after:
+             *
+             * magic   = 4 bytes
+             * version = 4 bytes
+             */
+            WalPosition recordAreaStart =
+                    new WalPosition(
+                            0,
+                            Integer.BYTES * 2L
+                    );
+
+            assertEquals(
+                    List.of(
+                            first,
+                            second,
+                            third
+                    ),
+                    wal.readFrom(recordAreaStart)
+            );
+        }
+    }
+
+    @Test
+    void readFromEndReturnsNoRecords() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(
+                    publishRecord(
+                            "message-1",
+                            "A"
+                    )
+            );
+
+            wal.append(
+                    publishRecord(
+                            "message-2",
+                            "B"
+                    )
+            );
+
+            /*
+             * currentDurablePosition() means:
+             *
+             * first byte after all currently durable
+             * WAL records.
+             */
+            WalPosition end =
+                    wal.currentDurablePosition();
+
+            assertTrue(
+                    wal.readFrom(end).isEmpty()
+            );
+        }
+    }
+
+    @Test
+    void readFromFrameBoundaryReturnsOnlySuffix() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord first =
+                publishRecord(
+                        "message-1",
+                        "A"
+                );
+
+        WalRecord second =
+                publishRecord(
+                        "message-2",
+                        "B"
+                );
+
+        WalRecord third =
+                publishRecord(
+                        "message-3",
+                        "C"
+                );
+
+        WalRecord fourth =
+                publishRecord(
+                        "message-4",
+                        "D"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(first);
+            wal.append(second);
+
+            /*
+             * Snapshot boundary:
+             *
+             * snapshot logically contains first + second.
+             */
+            WalPosition snapshotPosition =
+                    wal.currentDurablePosition();
+
+            wal.append(third);
+            wal.append(fourth);
+
+            assertEquals(
+                    List.of(
+                            third,
+                            fourth
+                    ),
+                    wal.readFrom(snapshotPosition)
+            );
+        }
+    }
+
+    @Test
+    void readFromPreservesWalRecordOrder() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord first =
+                publishRecord(
+                        "message-1",
+                        "A"
+                );
+
+        WalRecord second =
+                publishRecord(
+                        "message-2",
+                        "B"
+                );
+
+        WalRecord third =
+                publishRecord(
+                        "message-3",
+                        "C"
+                );
+
+        WalRecord fourth =
+                publishRecord(
+                        "message-4",
+                        "D"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(first);
+
+            WalPosition position =
+                    wal.currentDurablePosition();
+
+            wal.append(second);
+            wal.append(third);
+            wal.append(fourth);
+
+            List<WalRecord> suffix =
+                    wal.readFrom(position);
+
+            assertEquals(
+                    3,
+                    suffix.size()
+            );
+
+            assertEquals(
+                    second,
+                    suffix.get(0)
+            );
+
+            assertEquals(
+                    third,
+                    suffix.get(1)
+            );
+
+            assertEquals(
+                    fourth,
+                    suffix.get(2)
+            );
+        }
+    }
+
+    @Test
+    void readFromUnsupportedSegmentIsRejected() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(
+                    publishRecord(
+                            "message-1",
+                            "A"
+                    )
+            );
+
+            /*
+             * Current implementation supports only
+             * segment 0.
+             */
+            WalPosition unsupported =
+                    new WalPosition(
+                            1,
+                            Integer.BYTES * 2L
+                    );
+
+            WalException exception =
+                    assertThrows(
+                            WalException.class,
+                            () -> wal.readFrom(
+                                    unsupported
+                            )
+                    );
+
+            assertTrue(
+                    exception.getMessage()
+                            .contains("segment")
+            );
+        }
+    }
+
+    @Test
+    void readFromOffsetBeforeRecordAreaIsRejected() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(
+                    publishRecord(
+                            "message-1",
+                            "A"
+                    )
+            );
+
+            /*
+             * Offset 4 points inside the WAL header:
+             *
+             * [magic][version]
+             *        ^
+             */
+            WalPosition invalid =
+                    new WalPosition(
+                            0,
+                            Integer.BYTES
+                    );
+
+            assertThrows(
+                    WalException.class,
+                    () -> wal.readFrom(
+                            invalid
+                    )
+            );
+        }
+    }
+
+    @Test
+    void readFromOffsetBeyondWalEndIsRejected() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(
+                    publishRecord(
+                            "message-1",
+                            "A"
+                    )
+            );
+
+            WalPosition end =
+                    wal.currentDurablePosition();
+
+            WalPosition beyondEnd =
+                    new WalPosition(
+                            end.segmentId(),
+                            end.offset() + 1
+                    );
+
+            assertThrows(
+                    WalException.class,
+                    () -> wal.readFrom(
+                            beyondEnd
+                    )
+            );
+        }
+    }
+
+    @Test
+    void readFromMiddleOfFrameIsRejected() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord first =
+                publishRecord(
+                        "message-1",
+                        "A"
+                );
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(first);
+
+            /*
+             * First frame begins at offset 8:
+             *
+             * [magic:4][version:4][length...]
+             *                     ^
+             *                     8
+             *
+             * Offset 9 is therefore inside the first
+             * frame's length prefix.
+             */
+            WalPosition middleOfFrame =
+                    new WalPosition(
+                            0,
+                            Integer.BYTES * 2L + 1
+                    );
+
+            assertThrows(
+                    WalException.class,
+                    () -> wal.readFrom(
+                            middleOfFrame
+                    )
+            );
+        }
+    }
+    @Test
+    void readFromMiddleOfPayloadIsRejected() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(
+                    publishRecord(
+                            "message-1",
+                            "some-larger-payload"
+                    )
+            );
+
+            /*
+             * header  = 8 bytes
+             * length  = 4 bytes
+             *
+             * +1 places us inside the first payload.
+             */
+            WalPosition middleOfPayload =
+                    new WalPosition(
+                            0,
+                            Integer.BYTES * 3L + 1
+                    );
+
+            assertThrows(
+                    WalException.class,
+                    () -> wal.readFrom(
+                            middleOfPayload
+                    )
+            );
+        }
+    }
+
+
 
     private void appendPartialFrame(
             Path walPath,

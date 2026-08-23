@@ -38,7 +38,7 @@ public final class FileWriteAheadLog
      */
     private static final int LENGTH_PREFIX_BYTES =
             Integer.BYTES;
-    private static final int LENGTH_CHECKSUM =
+    private static final int CHECKSUM_BYTES =
             Integer.BYTES;
     private static final int WAL_HEADER_SIZE =
             Integer.BYTES + Integer.BYTES;
@@ -243,7 +243,7 @@ public final class FileWriteAheadLog
                 ByteBuffer.allocate(
                         LENGTH_PREFIX_BYTES
                                 + payload.length
-                                + LENGTH_CHECKSUM
+                                + CHECKSUM_BYTES
                 );
 
         frame.putInt(payload.length);
@@ -283,13 +283,6 @@ public final class FileWriteAheadLog
     public synchronized List<WalRecord> readAll() {
         ensureOpen();
 
-        List<WalRecord> records =
-                new ArrayList<>();
-
-        /*
-         * Recovery needs WRITE access because it may
-         * truncate a torn final frame.
-         */
         try (
                 FileChannel recoveryChannel =
                         FileChannel.open(
@@ -298,176 +291,17 @@ public final class FileWriteAheadLog
                                 StandardOpenOption.WRITE
                         )
         ) {
+            /*
+             * Header has already been validated when
+             * FileWriteAheadLog was opened.
+             */
             recoveryChannel.position(
                     WAL_HEADER_SIZE
             );
-            while (true) {
 
-                /*
-                 * Known-good boundary.
-                 *
-                 * If the current frame is incomplete,
-                 * truncate back to this position.
-                 */
-                long frameStart =
-                        recoveryChannel.position();
-
-                ByteBuffer lengthBuffer =
-                        ByteBuffer.allocate(
-                                LENGTH_PREFIX_BYTES
-                        );
-
-                ReadResult lengthResult =
-                        readFully(
-                                recoveryChannel,
-                                lengthBuffer
-                        );
-
-                /*
-                 * No bytes at all:
-                 *
-                 * clean EOF immediately after the
-                 * previous complete frame.
-                 */
-                if (lengthResult.bytesRead() == 0) {
-                    break;
-                }
-
-                /*
-                 * Example:
-                 *
-                 * [valid frame][00 00]
-                 *
-                 * Crash occurred while writing the
-                 * 4-byte length prefix.
-                 */
-                if (!lengthResult.complete()) {
-
-                    truncateTail(
-                            recoveryChannel,
-                            frameStart
-                    );
-
-                    break;
-                }
-
-                lengthBuffer.flip();
-
-                int payloadLength =
-                        lengthBuffer.getInt();
-
-                /*
-                 * A complete but impossible length is
-                 * considered corruption, not torn-tail
-                 * recovery.
-                 */
-                validateFrameLength(
-                        payloadLength
-                );
-
-                ByteBuffer payloadBuffer =
-                        ByteBuffer.allocate(
-                                payloadLength
-                        );
-
-                ReadResult payloadResult =
-                        readFully(
-                                recoveryChannel,
-                                payloadBuffer
-                        );
-
-                /*
-                 * Example:
-                 *
-                 * [length = 100][only 25 bytes...]
-                 *
-                 * EOF occurred before the full frame
-                 * payload was written.
-                 */
-                if (!payloadResult.complete()) {
-
-                    truncateTail(
-                            recoveryChannel,
-                            frameStart
-                    );
-
-                    break;
-                }
-
-                ByteBuffer checksumBuffer =
-                        ByteBuffer.allocate(
-                                LENGTH_CHECKSUM
-                        );
-
-                ReadResult checksumResult =
-                        readFully(
-                                recoveryChannel,
-                                checksumBuffer
-                        );
-                if (!checksumResult.complete()) {
-                    truncateTail(
-                            recoveryChannel,
-                            frameStart
-
-                    );
-                    break;
-                }
-                checksumBuffer.flip();
-
-                int storedChecksum =
-                        checksumBuffer.getInt();
-
-                /*
-                 * Calculate CRC32C over exactly the payload
-                 * bytes that were read from disk.
-                 */
-                CRC32C crc32c =
-                        new CRC32C();
-
-                crc32c.update(
-                        payloadBuffer.array(),
-                        0,
-                        payloadLength
-                );
-
-                int calculatedChecksum =
-                        (int) crc32c.getValue();
-
-                /*
-                 * The frame is structurally complete, but its
-                 * contents failed integrity verification.
-                 *
-                 * This is corruption.
-                 *
-                 * IMPORTANT:
-                 * Do NOT truncate the WAL here.
-                 */
-                if (calculatedChecksum != storedChecksum) {
-                    throw new WalException(
-                            "WAL checksum mismatch"
-                    );
-                }
-
-                payloadBuffer.flip();
-
-                String serialized =
-                        StandardCharsets.UTF_8
-                                .decode(payloadBuffer)
-                                .toString();
-
-                /*
-                 * If framing is complete but logical
-                 * deserialization fails, treat it as
-                 * corruption.
-                 *
-                 * Do NOT silently truncate.
-                 */
-                records.add(
-                        deserialize(serialized)
-                );
-            }
-
-            return List.copyOf(records);
+            return readRecordsFrom(
+                    recoveryChannel
+            );
 
         } catch (IOException e) {
             throw new WalException(
@@ -628,6 +462,64 @@ public final class FileWriteAheadLog
     }
 
     @Override
+    public synchronized List<WalRecord> readFrom(
+            WalPosition position
+    ) {
+        ensureOpen();
+
+        Objects.requireNonNull(
+                position,
+                "position"
+        );
+
+        /*
+         * Current implementation has exactly one WAL segment.
+         */
+        if (position.segmentId() != 0) {
+            throw new WalException(
+                    "Unsupported WAL segment: "
+                            + position.segmentId()
+            );
+        }
+
+        try (
+                FileChannel recoveryChannel =
+                        FileChannel.open(
+                                path,
+                                StandardOpenOption.READ,
+                                StandardOpenOption.WRITE
+                        )
+        ) {
+            long walEnd =
+                    recoveryChannel.size();
+
+            validateReplayPosition(
+                    recoveryChannel,
+                    position.offset(),
+                    walEnd
+            );
+
+            /*
+             * Offset is now known to be a valid frame boundary.
+             */
+            recoveryChannel.position(
+                    position.offset()
+            );
+
+            return readRecordsFrom(
+                    recoveryChannel
+            );
+
+        } catch (IOException e) {
+            throw new WalException(
+                    "Failed to read WAL from position: "
+                            + position,
+                    e
+            );
+        }
+    }
+
+    @Override
     public synchronized void close() {
         if (closed) {
             return;
@@ -645,6 +537,282 @@ public final class FileWriteAheadLog
                     e
             );
         }
+    }
+
+    private List<WalRecord> readRecordsFrom(
+            FileChannel recoveryChannel
+    ) throws IOException {
+
+        List<WalRecord> records =
+                new ArrayList<>();
+
+        while (true) {
+
+            long frameStart =
+                    recoveryChannel.position();
+
+            ByteBuffer lengthBuffer =
+                    ByteBuffer.allocate(
+                            LENGTH_PREFIX_BYTES
+                    );
+
+            ReadResult lengthResult =
+                    readFully(
+                            recoveryChannel,
+                            lengthBuffer
+                    );
+
+            /*
+             * Clean EOF.
+             */
+            if (lengthResult.bytesRead() == 0) {
+                break;
+            }
+
+            /*
+             * Torn length prefix.
+             */
+            if (!lengthResult.complete()) {
+                truncateTail(
+                        recoveryChannel,
+                        frameStart
+                );
+
+                break;
+            }
+
+            lengthBuffer.flip();
+
+            int payloadLength =
+                    lengthBuffer.getInt();
+
+            validateFrameLength(
+                    payloadLength
+            );
+
+            ByteBuffer payloadBuffer =
+                    ByteBuffer.allocate(
+                            payloadLength
+                    );
+
+            ReadResult payloadResult =
+                    readFully(
+                            recoveryChannel,
+                            payloadBuffer
+                    );
+
+            /*
+             * Torn payload.
+             */
+            if (!payloadResult.complete()) {
+                truncateTail(
+                        recoveryChannel,
+                        frameStart
+                );
+
+                break;
+            }
+
+            ByteBuffer checksumBuffer =
+                    ByteBuffer.allocate(
+                            CHECKSUM_BYTES
+                    );
+
+            ReadResult checksumResult =
+                    readFully(
+                            recoveryChannel,
+                            checksumBuffer
+                    );
+
+            /*
+             * Torn checksum.
+             */
+            if (!checksumResult.complete()) {
+                truncateTail(
+                        recoveryChannel,
+                        frameStart
+                );
+
+                break;
+            }
+
+            checksumBuffer.flip();
+
+            int storedChecksum =
+                    checksumBuffer.getInt();
+
+            CRC32C crc32c =
+                    new CRC32C();
+
+            crc32c.update(
+                    payloadBuffer.array(),
+                    0,
+                    payloadLength
+            );
+
+            int calculatedChecksum =
+                    (int) crc32c.getValue();
+
+            /*
+             * Complete frame with invalid CRC is corruption,
+             * NOT torn-tail recovery.
+             */
+            if (calculatedChecksum
+                    != storedChecksum) {
+
+                throw new WalException(
+                        "WAL checksum mismatch at frame offset "
+                                + frameStart
+                );
+            }
+
+            payloadBuffer.flip();
+
+            String serialized =
+                    StandardCharsets.UTF_8
+                            .decode(payloadBuffer)
+                            .toString();
+
+            records.add(
+                    deserialize(serialized)
+            );
+        }
+
+        return List.copyOf(records);
+    }
+
+    private void validateReplayPosition(
+            FileChannel channel,
+            long requestedOffset,
+            long walEnd
+    ) throws IOException {
+
+        /*
+         * Records cannot start inside the WAL header.
+         */
+        if (requestedOffset < WAL_HEADER_SIZE) {
+            throw new WalException(
+                    "WAL offset is before record area: "
+                            + requestedOffset
+            );
+        }
+
+        /*
+         * End of WAL itself is a valid replay position.
+         *
+         * readFrom(end) => empty result.
+         */
+        if (requestedOffset > walEnd) {
+            throw new WalException(
+                    "WAL offset is beyond end of file: "
+                            + requestedOffset
+                            + ", WAL size: "
+                            + walEnd
+            );
+        }
+
+        if (requestedOffset == WAL_HEADER_SIZE
+                || requestedOffset == walEnd) {
+            return;
+        }
+
+        /*
+         * Start scanning from the first frame.
+         *
+         * We do NOT interpret requestedOffset directly.
+         * Instead we discover every legitimate frame boundary.
+         */
+        channel.position(
+                WAL_HEADER_SIZE
+        );
+
+        while (channel.position() < walEnd) {
+
+            long frameStart =
+                    channel.position();
+
+            if (frameStart == requestedOffset) {
+                return;
+            }
+
+            ByteBuffer lengthBuffer =
+                    ByteBuffer.allocate(
+                            LENGTH_PREFIX_BYTES
+                    );
+
+            ReadResult lengthResult =
+                    readFully(
+                            channel,
+                            lengthBuffer
+                    );
+
+            /*
+             * While validating a replay position, an incomplete
+             * frame means the only valid boundary is frameStart.
+             *
+             * requestedOffset inside that frame cannot be valid.
+             */
+            if (!lengthResult.complete()) {
+                break;
+            }
+
+            lengthBuffer.flip();
+
+            int payloadLength =
+                    lengthBuffer.getInt();
+
+            validateFrameLength(
+                    payloadLength
+            );
+
+            /*
+             * Complete frame size:
+             *
+             * length prefix
+             * +
+             * payload
+             * +
+             * checksum
+             */
+            long frameEnd =
+                    frameStart
+                            + LENGTH_PREFIX_BYTES
+                            + payloadLength
+                            + CHECKSUM_BYTES;
+
+            if (frameEnd > walEnd) {
+                /*
+                 * Torn final frame.
+                 */
+                break;
+            }
+
+            /*
+             * If requestedOffset falls anywhere between
+             * frameStart and frameEnd, it is inside a frame.
+             */
+            if (requestedOffset > frameStart
+                    && requestedOffset < frameEnd) {
+
+                throw new WalException(
+                        "WAL offset does not point to a frame boundary: "
+                                + requestedOffset
+                );
+            }
+
+            channel.position(
+                    frameEnd
+            );
+
+            if (frameEnd == requestedOffset) {
+                return;
+            }
+        }
+
+        throw new WalException(
+                "WAL offset does not point to a valid frame boundary: "
+                        + requestedOffset
+        );
     }
 
     /*

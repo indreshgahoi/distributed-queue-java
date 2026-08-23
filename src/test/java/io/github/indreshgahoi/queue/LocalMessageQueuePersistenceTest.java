@@ -222,6 +222,11 @@ class LocalMessageQueuePersistenceTest {
             }
 
             @Override
+            public List<WalRecord> readFrom(WalPosition position) {
+                return List.of();
+            }
+
+            @Override
             public void close() {
             }
         };
@@ -1865,6 +1870,11 @@ class LocalMessageQueuePersistenceTest {
             return null;
         }
 
+        @Override
+        public List<WalRecord> readFrom(WalPosition position) {
+            return List.of();
+        }
+
         void allowLeaseStarted() {
             failLeaseStarted = false;
         }
@@ -1912,6 +1922,11 @@ class LocalMessageQueuePersistenceTest {
             return null;
         }
 
+        @Override
+        public List<WalRecord> readFrom(WalPosition position) {
+            return List.of();
+        }
+
         void allowLeaseExpired() {
             failureEnabled = false;
         }
@@ -1950,6 +1965,11 @@ class LocalMessageQueuePersistenceTest {
         @Override
         public WalPosition currentDurablePosition() {
             return null;
+        }
+
+        @Override
+        public List<WalRecord> readFrom(WalPosition position) {
+            return List.of();
         }
 
         void allowLeaseExpired() {
@@ -1991,6 +2011,11 @@ class LocalMessageQueuePersistenceTest {
             return null;
         }
 
+        @Override
+        public List<WalRecord> readFrom(WalPosition position) {
+            return List.of();
+        }
+
         void allowAck() {
             failAck = false;
         }
@@ -2029,6 +2054,11 @@ class LocalMessageQueuePersistenceTest {
             return null;
         }
 
+        @Override
+        public List<WalRecord> readFrom(WalPosition position) {
+            return List.of();
+        }
+
         void allowNack() {
             failNack = false;
         }
@@ -2065,6 +2095,11 @@ class LocalMessageQueuePersistenceTest {
         @Override
         public WalPosition currentDurablePosition() {
             return null;
+        }
+
+        @Override
+        public List<WalRecord> readFrom(WalPosition position) {
+            return List.of();
         }
 
         void allowLeaseExpiry() {

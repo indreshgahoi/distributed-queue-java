@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -686,6 +687,11 @@ class LocalMessageQueueSnapshotTest {
         @Override
         public WalPosition currentDurablePosition() {
             return position;
+        }
+
+        @Override
+        public List<WalRecord> readFrom(WalPosition position) {
+            return List.of();
         }
 
         @Override

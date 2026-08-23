@@ -1165,7 +1165,7 @@ Restart does not cause a transition:
 
 The active lease remains authoritative until its normal termination condition.
 
-v0.12.1 — Snapshot semantics and state model.
+## VERSION v0.12.1 — Snapshot semantics and state model.
 The key principle is:
 A snapshot is a durable image of the queue’s logical state at a specific WAL position.
 
@@ -1286,4 +1286,191 @@ How do we identify the WAL position represented by the snapshot?
 There are two reasonable choices for our local WAL:
 A. byte offset
 B. monotonically increasing WAL sequence number
+```
+## VERSION v0.12.2 — Snapshot-Based Recovery.
+The goal of this phase is:
+> Recover queue state from the latest durable snapshot, then replay only the WAL suffix after the snapshot’s WalPosition.
+The architecture becomes:
+```text
+                STARTUP
+
+                   |
+                   v
+
+         loadLatestSnapshot()
+                   |
+          +--------+--------+
+          |                 |
+      snapshot             none
+          |                 |
+          v                 v
+   restore snapshot     empty state
+          |                 |
+          +--------+--------+
+                   |
+                   v
+          determine WAL position
+                   |
+                   v
+          readFrom(WalPosition)
+                   |
+                   v
+            replay WAL suffix
+                   |
+                   v
+       resolve time-based state
+                   |
+                   v
+         materialize queue state
+```
+The critical invariant for this release is:
+> Snapshot state plus WAL records after the snapshot position must produce exactly the same logical state as replaying the complete WAL from the beginning.
+
+## v0.12.2 — Snapshot-Based Recovery
+
+### G99 — Recovery may begin from a valid snapshot
+
+If a valid snapshot exists, recovery restores the snapshot state instead of
+replaying WAL history already represented by that snapshot.
+
+### G100 — WAL replay begins exactly at the snapshot WalPosition
+
+The snapshot position is:
+
+    WalPosition(segmentId, offset)
+
+The offset represents the first WAL byte NOT included in the snapshot.
+
+Recovery therefore replays records beginning exactly at that position.
+
+### G101 — Snapshot + WAL suffix is equivalent to full WAL replay
+
+For any valid snapshot S taken at WAL position P:
+
+    recover(S, WAL[P..end])
+
+must produce the same logical queue state as:
+
+    recover(empty, WAL[beginning..end])
+
+### G102 — WAL position must be a valid frame boundary
+
+Recovery must reject a snapshot whose WAL offset points:
+
+- before the WAL record area;
+- beyond the end of the WAL;
+- inside a WAL frame.
+
+A snapshot position is trusted only after validation against the WAL.
+
+### G103 — Snapshot state is restored before WAL suffix replay
+
+Recovery order is:
+
+    restore snapshot
+        |
+        v
+    replay WAL suffix
+
+WAL suffix records may supersede snapshot state.
+
+Examples:
+
+    snapshot: M1 READY
+    suffix: LEASE_STARTED M1
+    result: M1 IN_FLIGHT
+
+or:
+
+    snapshot: M1 IN_FLIGHT
+    suffix: ACK M1
+    result: DONE
+
+### G104 — Active snapshot leases preserve ownership
+
+If an IN_FLIGHT entry from the snapshot has:
+
+    leaseUntil > recoveryTime
+
+then recovery restores:
+
+    message
+    receiptHandle
+    attempt
+    leaseUntil
+
+The receipt handle remains valid.
+
+### G105 — Expired snapshot leases are derived during recovery
+
+If:
+
+    leaseUntil <= recoveryTime
+
+the lease is no longer active.
+
+Recovery derives:
+
+    READY(nextAttempt)
+
+or:
+
+    DEAD_LETTER
+
+when max delivery attempts are exhausted.
+
+Recovery does not append a new LEASE_EXPIRED record for this derived state.
+
+### G106 — WAL suffix can supersede snapshot-derived state
+
+The WAL is newer than the snapshot.
+
+Therefore WAL suffix transitions are authoritative over snapshot state.
+
+### G107 — Missing snapshot falls back to full WAL replay
+
+If no snapshot exists:
+
+    recovery begins from the first WAL record.
+
+Snapshot support must not make snapshot existence mandatory.
+
+### G108 — Invalid snapshot must not silently produce partial recovery
+
+If snapshot integrity or WAL-position validation fails, the recovery policy
+must explicitly decide whether to:
+
+- fail startup; or
+- ignore the snapshot and replay the complete WAL.
+
+This policy must not be accidental.
+> If the snapshot itself is corrupt, fall back to full WAL replay only if the WAL is still complete and available.
+```text
+                    STARTUP
+                       |
+             +---------+---------+
+             |                   |
+         snapshot             no snapshot
+             |                   |
+             v                   v
+     RecoveryState map       empty map
+             |                   |
+             +---------+---------+
+                       |
+                       v
+                WAL records
+             suffix / complete
+                       |
+                       v
+                applyWalRecord()
+                       |
+                       v
+              final logical state
+                       |
+                       v
+            materializeRecoveredState()
+                       |
+            +----------+-----------+
+            |          |           |
+          READY    IN_FLIGHT    DELAYED/DLQ
 ```

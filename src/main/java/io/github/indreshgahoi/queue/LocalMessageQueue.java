@@ -10,7 +10,9 @@ import io.github.indreshgahoi.queue.storage.snapshot.DeadLetterSnapshotEntry;
 import io.github.indreshgahoi.queue.storage.snapshot.DelayedSnapshotEntry;
 import io.github.indreshgahoi.queue.storage.snapshot.InFlightSnapshotEntry;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshot;
+import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshotStore;
 import io.github.indreshgahoi.queue.storage.snapshot.ReadySnapshotEntry;
+import io.github.indreshgahoi.queue.storage.snapshot.SnapshotException;
 import io.github.indreshgahoi.queue.storage.wal.InMemoryWriteAheadLog;
 import io.github.indreshgahoi.queue.storage.wal.WalException;
 import io.github.indreshgahoi.queue.storage.wal.WalRecord;
@@ -54,6 +56,7 @@ public final class LocalMessageQueue
     private final Clock clock;
     private final QueueConfiguration config;
     private final WriteAheadLog wal;
+    private final Optional<QueueSnapshotStore> snapshotStore;
 
     /*
      * Convenience constructor.
@@ -65,7 +68,8 @@ public final class LocalMessageQueue
         this(
                 Clock.systemUTC(),
                 new QueueConfiguration(),
-                new InMemoryWriteAheadLog()
+                new InMemoryWriteAheadLog(),
+                Optional.empty()
         );
     }
 
@@ -79,7 +83,8 @@ public final class LocalMessageQueue
         this(
                 clock,
                 new QueueConfiguration(),
-                new InMemoryWriteAheadLog()
+                new InMemoryWriteAheadLog(),
+                Optional.empty()
         );
     }
 
@@ -94,7 +99,8 @@ public final class LocalMessageQueue
         this(
                 clock,
                 config,
-                new InMemoryWriteAheadLog()
+                new InMemoryWriteAheadLog(),
+                Optional.empty()
         );
     }
 
@@ -112,6 +118,39 @@ public final class LocalMessageQueue
             QueueConfiguration config,
             WriteAheadLog wal
     ) {
+        this(
+                clock,
+                config,
+                wal,
+                Optional.empty()
+        );
+    }
+
+    public LocalMessageQueue(
+            Clock clock,
+            QueueConfiguration config,
+            WriteAheadLog wal,
+            QueueSnapshotStore snapshotStore
+    ) {
+        this(
+                clock,
+                config,
+                wal,
+                Optional.of(
+                        Objects.requireNonNull(
+                                snapshotStore,
+                                "snapshotStore"
+                        )
+                )
+        );
+    }
+
+    private LocalMessageQueue(
+            Clock clock,
+            QueueConfiguration config,
+            WriteAheadLog wal,
+            Optional<QueueSnapshotStore> snapshotStore
+    ) {
         this.clock =
                 Objects.requireNonNull(
                         clock,
@@ -128,6 +167,12 @@ public final class LocalMessageQueue
                 Objects.requireNonNull(
                         wal,
                         "wal"
+                );
+
+        this.snapshotStore =
+                Objects.requireNonNull(
+                        snapshotStore,
+                        "snapshotStore"
                 );
 
         recover();
@@ -560,133 +605,338 @@ public final class LocalMessageQueue
     private void recover() {
         Map<String, RecoveryState> states =
                 new LinkedHashMap<>();
+        List<WalRecord> recordsToReplay;
+        if (snapshotStore.isPresent()) {
+            Optional<QueueSnapshot> snapshot =
+                    loadSnapshotSafely();
+            if (snapshot.isPresent()) {
+                QueueSnapshot queueSnapshot =
+                        snapshot.get();
 
-        for (WalRecord record : wal.readAll()) {
+                /*
+                 * Establish snapshot as the recovery baseline.
+                 */
+                restoreSnapshotIntoRecoveryState(
+                        queueSnapshot,
+                        states
+                );
 
-            switch (record.type()) {
+                /*
+                 * Replay only history NOT already represented
+                 * by the snapshot.
+                 *
+                 * readFrom() validates that WalPosition points
+                 * to a real WAL frame boundary.
+                 */
+                recordsToReplay =
+                        wal.readFrom(
+                                queueSnapshot.walPosition()
+                        );
 
-                case PUBLISH -> {
-                    Message message =
-                            new Message(
-                                    record.messageId(),
-                                    record.payload()
-                            );
-
-                    states.put(
-                            record.messageId(),
-                            new RecoveryState(
-                                    message,
-                                    RecoveryStatus.READY,
-                                    null,
-                                    record.attempt(),
-                                    null,
-                                    null
-                            )
-                    );
-                }
-
-                case LEASE_STARTED -> {
-                    RecoveryState current =
-                            requireExistingState(
-                                    states,
-                                    record.messageId()
-                            );
-
-                    states.put(
-                            record.messageId(),
-                            new RecoveryState(
-                                    current.message(),
-                                    RecoveryStatus.IN_FLIGHT,
-                                    record.receiptHandle(),
-                                    record.attempt(),
-                                    record.timestamp(),   // leaseUntil
-                                    null
-                            )
-                    );
-                }
-
-                case ACK -> {
-                    RecoveryState current =
-                            requireExistingState(
-                                    states,
-                                    record.messageId()
-                            );
-
-                    states.put(
-                            record.messageId(),
-                            new RecoveryState(
-                                    current.message(),
-                                    RecoveryStatus.DONE,
-                                    null,
-                                    current.attempt(),
-                                    null,
-                                    null
-                            )
-                    );
-                }
-
-                case NACK -> {
-                    RecoveryState current =
-                            requireExistingState(
-                                    states,
-                                    record.messageId()
-                            );
-
-                    states.put(
-                            record.messageId(),
-                            new RecoveryState(
-                                    current.message(),
-                                    RecoveryStatus.DELAYED,
-                                    null,
-                                    record.attempt(),
-                                    null,
-                                    record.timestamp()
-                            )
-                    );
-
-                }
-                case DEAD_LETTER -> {
-                    RecoveryState current =
-                            requireExistingState(
-                                    states,
-                                    record.messageId()
-                            );
-
-                    states.put(
-                            record.messageId(),
-                            new RecoveryState(
-                                    current.message(),
-                                    RecoveryStatus.DEAD_LETTER,
-                                    null,
-                                    record.attempt(),
-                                    null,
-                                    null
-                            )
-                    );
-                }
-                case LEASE_EXPIRED -> {
-                    RecoveryState current =
-                            requireExistingState(
-                                    states,
-                                    record.messageId()
-                            );
-
-                    states.put(
-                            record.messageId(),
-                            new RecoveryState(
-                                    current.message(),
-                                    RecoveryStatus.READY,
-                                    null,
-                                    record.attempt(),
-                                    null,
-                                    null
-                            )
-                    );
-                }
+            } else {
+                /*
+                 * No usable snapshot.
+                 *
+                 * WAL remains the authoritative recovery source.
+                 */
+                recordsToReplay =
+                        wal.readAll();
             }
+
+        } else {
+            /*
+             * Snapshot support was not configured.
+             */
+            recordsToReplay =
+                    wal.readAll();
         }
 
+        applyWalRecords(
+                states,
+                recordsToReplay
+        );
+
         materializeRecoveredState(states);
+    }
+
+    private void applyWalRecords(
+            Map<String, RecoveryState> states,
+            List<WalRecord> records
+    ) {
+        for (WalRecord record : records) {
+            applyWalRecord(
+                    states,
+                    record
+            );
+        }
+    }
+
+    private void applyWalRecord(
+            Map<String, RecoveryState> states,
+            WalRecord record
+    ) {
+
+        switch (record.type()) {
+
+            case PUBLISH -> {
+                Message message =
+                        new Message(
+                                record.messageId(),
+                                record.payload()
+                        );
+
+                states.put(
+                        record.messageId(),
+                        new RecoveryState(
+                                message,
+                                RecoveryStatus.READY,
+                                null,
+                                record.attempt(),
+                                null,
+                                null
+                        )
+                );
+            }
+
+            case LEASE_STARTED -> {
+                RecoveryState current =
+                        requireExistingState(
+                                states,
+                                record.messageId()
+                        );
+
+                states.put(
+                        record.messageId(),
+                        new RecoveryState(
+                                current.message(),
+                                RecoveryStatus.IN_FLIGHT,
+                                record.receiptHandle(),
+                                record.attempt(),
+                                record.timestamp(),
+                                null
+                        )
+                );
+            }
+
+            case ACK -> {
+                RecoveryState current =
+                        requireExistingState(
+                                states,
+                                record.messageId()
+                        );
+
+                states.put(
+                        record.messageId(),
+                        new RecoveryState(
+                                current.message(),
+                                RecoveryStatus.DONE,
+                                null,
+                                current.attempt(),
+                                null,
+                                null
+                        )
+                );
+            }
+
+            case NACK -> {
+                RecoveryState current =
+                        requireExistingState(
+                                states,
+                                record.messageId()
+                        );
+
+                states.put(
+                        record.messageId(),
+                        new RecoveryState(
+                                current.message(),
+                                RecoveryStatus.DELAYED,
+                                null,
+                                record.attempt(),
+                                null,
+                                record.timestamp()
+                        )
+                );
+            }
+
+            case LEASE_EXPIRED -> {
+                RecoveryState current =
+                        requireExistingState(
+                                states,
+                                record.messageId()
+                        );
+
+                states.put(
+                        record.messageId(),
+                        new RecoveryState(
+                                current.message(),
+                                RecoveryStatus.READY,
+                                null,
+                                record.attempt(),
+                                null,
+                                null
+                        )
+                );
+            }
+
+            case DEAD_LETTER -> {
+                RecoveryState current =
+                        requireExistingState(
+                                states,
+                                record.messageId()
+                        );
+
+                states.put(
+                        record.messageId(),
+                        new RecoveryState(
+                                current.message(),
+                                RecoveryStatus.DEAD_LETTER,
+                                null,
+                                record.attempt(),
+                                null,
+                                null
+                        )
+                );
+            }
+        }
+    }
+
+    private void restoreSnapshotIntoRecoveryState(
+            QueueSnapshot snapshot,
+            Map<String, RecoveryState> states
+    ) {
+
+        for (ReadySnapshotEntry entry :
+                snapshot.ready()) {
+
+            Message message =
+                    new Message(
+                            entry.messageId(),
+                            entry.payload()
+                    );
+
+            putSnapshotState(
+                    states,
+                    entry.messageId(),
+                    new RecoveryState(
+                            message,
+                            RecoveryStatus.READY,
+                            null,
+                            entry.nextAttempt(),
+                            null,
+                            null
+                    )
+            );
+        }
+
+        for (InFlightSnapshotEntry entry :
+                snapshot.inFlight()) {
+
+            Message message =
+                    new Message(
+                            entry.messageId(),
+                            entry.payload()
+                    );
+
+            putSnapshotState(
+                    states,
+                    entry.messageId(),
+                    new RecoveryState(
+                            message,
+                            RecoveryStatus.IN_FLIGHT,
+                            entry.receiptHandle(),
+                            entry.attempt(),
+                            entry.leaseUntil(),
+                            null
+                    )
+            );
+        }
+
+        for (DelayedSnapshotEntry entry :
+                snapshot.delayed()) {
+
+            Message message =
+                    new Message(
+                            entry.messageId(),
+                            entry.payload()
+                    );
+
+            putSnapshotState(
+                    states,
+                    entry.messageId(),
+                    new RecoveryState(
+                            message,
+                            RecoveryStatus.DELAYED,
+                            null,
+                            entry.nextAttempt(),
+                            null,
+                            entry.retryAt()
+                    )
+            );
+        }
+
+        for (DeadLetterSnapshotEntry entry :
+                snapshot.deadLetters()) {
+
+            Message message =
+                    new Message(
+                            entry.messageId(),
+                            entry.payload()
+                    );
+
+            putSnapshotState(
+                    states,
+                    entry.messageId(),
+                    new RecoveryState(
+                            message,
+                            RecoveryStatus.DEAD_LETTER,
+                            null,
+                            0,
+                            null,
+                            null
+                    )
+            );
+        }
+    }
+
+    private void putSnapshotState(
+            Map<String, RecoveryState> states,
+            String messageId,
+            RecoveryState state
+    ) {
+        RecoveryState existing =
+                states.putIfAbsent(
+                        messageId,
+                        state
+                );
+
+        if (existing != null) {
+            throw new SnapshotException(
+                    "Snapshot contains duplicate logical message state: "
+                            + messageId
+            );
+        }
+    }
+
+    private Optional<QueueSnapshot> loadSnapshotSafely() {
+        try {
+            return snapshotStore
+                    .orElseThrow()
+                    .loadLatest();
+
+        } catch (SnapshotException e) {
+
+            /*
+             * v0.12.2 recovery policy:
+             *
+             * Snapshot is an optimization/recovery checkpoint.
+             * WAL is still complete because compaction has not
+             * been introduced yet.
+             *
+             * Therefore a corrupt snapshot can be ignored and
+             * recovery falls back to full WAL replay.
+             */
+            return Optional.empty();
+        }
     }
 
     private void materializeRecoveredState(
@@ -704,9 +954,11 @@ public final class LocalMessageQueue
                 );
 
                 case IN_FLIGHT -> {
-                    Instant now = clock.instant();
+                    Instant now =
+                            clock.instant();
 
-                    if (state.leaseUntil().isAfter(now)) {
+                    if (state.leaseUntil()
+                            .isAfter(now)) {
 
                         inFlightByReceiptHandle.put(
                                 state.receiptHandle(),
@@ -723,8 +975,10 @@ public final class LocalMessageQueue
                         /*
                          * Lease expired while queue was offline.
                          *
-                         * Recovery derives the current state.
-                         * It does NOT append a new WAL record.
+                         * Recovery derives this state from the
+                         * durable leaseUntil.
+                         *
+                         * Recovery does NOT create new WAL history.
                          */
                         if (state.attempt()
                                 >= config.maxDeliveryAttempts()) {
@@ -758,7 +1012,7 @@ public final class LocalMessageQueue
                 );
 
                 case DONE -> {
-                    // Nothing to restore.
+                    // Terminal message. Nothing to materialize.
                 }
             }
         }
