@@ -768,3 +768,55 @@ An incomplete final frame remains recoverable using the existing
 torn-tail policy.
 
 Complete valid frames before the torn tail are preserved.
+
+### Version v0.11.0 — WAL format versioning.
+Now we have a real reason for it because our physical wal format has already evolved. 
+```text
+v0.8
+delimiter-based records
+
+v0.9
+[length][payload]
+
+v0.10
+[length][payload][CRC32C]
+```
+**Motivation**
+Right now if an older file is open by newer code, recovery has no explicit way to know which format it is reading.
+
+> The new requirement is
+> Recovery must be able to identify the WAL format before interpreting the records.
+we would introduce small fixed WAL header 
+```text
++-------------+-------------+
+| Magic       | Version     |
+| 4 bytes     | 4 bytes     |
++-------------+-------------+
+```
+Conceptually:
+```text
+WAL file
+
+[magic = DQWL]
+[version = 1]
+
+[length][payload][checksum]
+[length][payload][checksum]
+...
+```
+The magic answers:
+> "is this even one of our WAL files?"
+
+The version answers:
+> "Which decoder and recovery rules should I use?"
+
+G78. Every WAL starts with a fixed magic identifier.
+
+G79. Every WAL declares its physical format version.
+
+G80. Recovery must validate the WAL header before reading records.
+
+G81. Unknown WAL versions must fail explicitly rather than being
+interpreted using the current decoder.
+
+G82. Opening an existing WAL must not rewrite or duplicate its header.

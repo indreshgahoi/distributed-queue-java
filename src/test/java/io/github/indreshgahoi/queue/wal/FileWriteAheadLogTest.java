@@ -17,6 +17,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class FileWriteAheadLogTest {
 
+    private static final int WAL_HEADER_SIZE =
+            Integer.BYTES * 2;
+
     @TempDir
     Path tempDir;
 
@@ -146,10 +149,10 @@ class FileWriteAheadLogTest {
                         WalRecordType.PUBLISH,
                         "message-1",
                         """
-                        payment
-                        created
-                        successfully
-                        """,
+                                payment
+                                created
+                                successfully
+                                """,
                         null,
                         1,
                         Instant.parse("2026-08-22T00:00:00Z")
@@ -285,11 +288,20 @@ class FileWriteAheadLogTest {
         ByteBuffer buffer =
                 ByteBuffer.wrap(fileBytes);
 
+        assertTrue(
+                buffer.remaining() >= Integer.BYTES
+        );
+        buffer.getInt(); // magic
+        assertTrue(
+                buffer.remaining() >= Integer.BYTES
+        );
+        buffer.getInt(); // version
+
         int declaredLength =
                 buffer.getInt();
 
         int actualPayloadLength =
-                fileBytes.length - Integer.BYTES -Integer.BYTES;
+                fileBytes.length - Integer.BYTES - Integer.BYTES - Integer.BYTES - Integer.BYTES;
 
         assertEquals(
                 actualPayloadLength,
@@ -322,6 +334,17 @@ class FileWriteAheadLogTest {
 
         ByteBuffer buffer =
                 ByteBuffer.wrap(bytes);
+
+
+
+        assertTrue(
+                buffer.remaining() >= Integer.BYTES
+        );
+        buffer.getInt(); // magic
+        assertTrue(
+                buffer.remaining() >= Integer.BYTES
+        );
+        buffer.getInt(); // version
 
         /*
          * Frame 1
@@ -405,11 +428,16 @@ class FileWriteAheadLogTest {
         ByteBuffer buffer =
                 ByteBuffer.wrap(bytes);
 
+        buffer.position(WAL_HEADER_SIZE);
+
         int frameLength =
                 buffer.getInt();
 
         assertEquals(
-                bytes.length - Integer.BYTES - Integer.BYTES,
+                bytes.length
+                        - WAL_HEADER_SIZE
+                        - Integer.BYTES
+                        - Integer.BYTES,
                 frameLength
         );
 
@@ -685,11 +713,15 @@ class FileWriteAheadLogTest {
 
         Path walPath = tempDir.resolve("queue.wal");
 
+        try (WriteAheadLog ignored =
+                     new FileWriteAheadLog(walPath)) {
+        }
+
         try (FileChannel channel =
                      FileChannel.open(
                              walPath,
-                             StandardOpenOption.CREATE,
-                             StandardOpenOption.WRITE
+                             StandardOpenOption.WRITE,
+                             StandardOpenOption.APPEND
                      )) {
 
             ByteBuffer buffer =
@@ -923,6 +955,8 @@ class FileWriteAheadLogTest {
         ByteBuffer buffer =
                 ByteBuffer.wrap(bytes);
 
+        buffer.position(WAL_HEADER_SIZE);
+
         int payloadLength =
                 buffer.getInt();
 
@@ -936,7 +970,8 @@ class FileWriteAheadLogTest {
          * v0.10.0 requires another 4-byte checksum.
          */
         assertEquals(
-                Integer.BYTES
+                WAL_HEADER_SIZE
+                        + Integer.BYTES
                         + payloadLength
                         + Integer.BYTES,
                 bytes.length
@@ -967,6 +1002,8 @@ class FileWriteAheadLogTest {
 
         ByteBuffer buffer =
                 ByteBuffer.wrap(bytes);
+
+        buffer.position(WAL_HEADER_SIZE);
 
         int payloadLength =
                 buffer.getInt();
@@ -1029,6 +1066,8 @@ class FileWriteAheadLogTest {
                              StandardOpenOption.READ,
                              StandardOpenOption.WRITE
                      )) {
+            int walOffset = Integer.BYTES * 2;
+            channel.position(walOffset);
 
             ByteBuffer lengthBuffer =
                     ByteBuffer.allocate(Integer.BYTES);
@@ -1047,7 +1086,9 @@ class FileWriteAheadLogTest {
             long payloadPosition =
                     Integer.BYTES;
 
-            channel.position(payloadPosition);
+            channel.position(
+                    walOffset + payloadPosition
+            );
 
             ByteBuffer oneByte =
                     ByteBuffer.allocate(1);
@@ -1065,7 +1106,9 @@ class FileWriteAheadLogTest {
             byte corrupted =
                     (byte) (original ^ 0x01);
 
-            channel.position(payloadPosition);
+            channel.position(
+                    walOffset + payloadPosition
+            );
 
             ByteBuffer replacement =
                     ByteBuffer.wrap(
@@ -1086,6 +1129,7 @@ class FileWriteAheadLogTest {
             );
         }
     }
+
     @Test
     void corruptedStoredChecksumIsDetected()
             throws IOException {
@@ -1111,6 +1155,8 @@ class FileWriteAheadLogTest {
                              StandardOpenOption.WRITE
                      )) {
 
+            channel.position(WAL_HEADER_SIZE);
+
             ByteBuffer lengthBuffer =
                     ByteBuffer.allocate(Integer.BYTES);
 
@@ -1121,7 +1167,8 @@ class FileWriteAheadLogTest {
                     lengthBuffer.getInt();
 
             long checksumPosition =
-                    Integer.BYTES
+                    WAL_HEADER_SIZE
+                            + Integer.BYTES
                             + payloadLength;
 
             channel.position(checksumPosition);
@@ -1160,6 +1207,7 @@ class FileWriteAheadLogTest {
             );
         }
     }
+
     @Test
     void checksumMismatchIsNotTreatedAsRecoverableTornTail()
             throws IOException {
@@ -1198,6 +1246,8 @@ class FileWriteAheadLogTest {
                              StandardOpenOption.WRITE
                      )) {
 
+            channel.position(WAL_HEADER_SIZE);
+
             ByteBuffer firstLengthBuffer =
                     ByteBuffer.allocate(Integer.BYTES);
 
@@ -1208,7 +1258,8 @@ class FileWriteAheadLogTest {
                     firstLengthBuffer.getInt();
 
             long secondFrameStart =
-                    Integer.BYTES
+                    WAL_HEADER_SIZE
+                            + Integer.BYTES
                             + firstPayloadLength
                             + Integer.BYTES;
 
@@ -1269,6 +1320,258 @@ class FileWriteAheadLogTest {
         assertEquals(
                 sizeBeforeCorruption,
                 Files.size(walPath)
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // WAL Header/ Validation
+    // ---------------------------------------------------------------------
+    @Test
+    void newWalStartsWithMagicAndVersion()
+            throws IOException {
+
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (WriteAheadLog ignored =
+                     new FileWriteAheadLog(walPath)) {
+        }
+
+        byte[] bytes =
+                Files.readAllBytes(walPath);
+
+        ByteBuffer buffer =
+                ByteBuffer.wrap(bytes);
+
+        assertEquals(
+                0x4451574C,
+                buffer.getInt()
+        );
+
+        assertEquals(
+                1,
+                buffer.getInt()
+        );
+    }
+
+    @Test
+    void existingWalWithSupportedVersionCanBeReopened() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        WalRecord first =
+                publishRecord(
+                        "message-1",
+                        "A"
+                );
+
+        /*
+         * First open creates:
+         *
+         * [magic][version]
+         *
+         * and then appends a record.
+         */
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath)) {
+
+            wal.append(first);
+        }
+
+        /*
+         * Reopening must validate the existing header
+         * and continue normally.
+         */
+        try (WriteAheadLog reopened =
+                     new FileWriteAheadLog(walPath)) {
+
+            assertEquals(
+                    List.of(first),
+                    reopened.readAll()
+            );
+        }
+    }
+
+    @Test
+    void invalidWalMagicIsRejected()
+            throws IOException {
+
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (FileChannel channel =
+                     FileChannel.open(
+                             walPath,
+                             StandardOpenOption.CREATE,
+                             StandardOpenOption.WRITE
+                     )) {
+
+            ByteBuffer header =
+                    ByteBuffer.allocate(
+                            Integer.BYTES * 2
+                    );
+
+            /*
+             * Wrong magic.
+             */
+            header.putInt(0x12345678);
+
+            /*
+             * Valid-looking version.
+             */
+            header.putInt(1);
+
+            header.flip();
+
+            while (header.hasRemaining()) {
+                channel.write(header);
+            }
+        }
+
+        assertThrows(
+                WalException.class,
+                () -> new FileWriteAheadLog(walPath)
+        );
+    }
+
+    @Test
+    void unsupportedWalVersionIsRejected()
+            throws IOException {
+
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (FileChannel channel =
+                     FileChannel.open(
+                             walPath,
+                             StandardOpenOption.CREATE,
+                             StandardOpenOption.WRITE
+                     )) {
+
+            ByteBuffer header =
+                    ByteBuffer.allocate(
+                            Integer.BYTES * 2
+                    );
+
+            /*
+             * DQWL
+             */
+            header.putInt(0x4451574C);
+
+            /*
+             * Deliberately unsupported version.
+             */
+            header.putInt(999);
+
+            header.flip();
+
+            while (header.hasRemaining()) {
+                channel.write(header);
+            }
+        }
+
+        assertThrows(
+                WalException.class,
+                () -> new FileWriteAheadLog(walPath)
+        );
+    }
+
+    @Test
+    void reopeningExistingWalDoesNotWriteHeaderAgain()
+            throws IOException {
+
+        Path walPath = tempDir.resolve("queue.wal");
+
+        /*
+         * Create the WAL.
+         */
+        try (WriteAheadLog ignored =
+                     new FileWriteAheadLog(walPath)) {
+        }
+
+        long sizeAfterFirstOpen =
+                Files.size(walPath);
+
+        /*
+         * Header should currently be:
+         *
+         * magic   = 4 bytes
+         * version = 4 bytes
+         *
+         * total   = 8 bytes
+         */
+        assertEquals(
+                Integer.BYTES * 2,
+                sizeAfterFirstOpen
+        );
+
+        /*
+         * Reopen several times.
+         */
+        try (WriteAheadLog ignored =
+                     new FileWriteAheadLog(walPath)) {
+        }
+
+        try (WriteAheadLog ignored =
+                     new FileWriteAheadLog(walPath)) {
+        }
+
+        long sizeAfterReopen =
+                Files.size(walPath);
+
+        /*
+         * If constructor accidentally writes the header
+         * every time, this would become:
+         *
+         * 8
+         * 16
+         * 24
+         * ...
+         */
+        assertEquals(
+                sizeAfterFirstOpen,
+                sizeAfterReopen
+        );
+    }
+
+    @Test
+    void incompleteWalHeaderIsRejected() throws IOException {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        /*
+         * Valid WAL header is:
+         *
+         * [magic: 4 bytes][version: 4 bytes]
+         *
+         * We intentionally write only part of the header.
+         */
+        try (FileChannel channel =
+                     FileChannel.open(
+                             walPath,
+                             StandardOpenOption.CREATE,
+                             StandardOpenOption.WRITE
+                     )) {
+
+            ByteBuffer partialHeader =
+                    ByteBuffer.allocate(Integer.BYTES);
+
+            /*
+             * Write only the magic.
+             * Version bytes are missing.
+             */
+            partialHeader.putInt(0x4451574C); // DQWL
+            partialHeader.flip();
+
+            while (partialHeader.hasRemaining()) {
+                channel.write(partialHeader);
+            }
+        }
+
+        WalException exception =
+                assertThrows(
+                        WalException.class,
+                        () -> new FileWriteAheadLog(walPath)
+                );
+
+        assertTrue(
+                exception.getMessage()
+                        .contains("Incomplete WAL header")
         );
     }
 

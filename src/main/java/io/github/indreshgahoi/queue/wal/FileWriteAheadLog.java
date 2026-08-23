@@ -16,6 +16,16 @@ import java.util.zip.CRC32C;
 public final class FileWriteAheadLog
         implements WriteAheadLog {
 
+    /**
+     * WAL Header
+     * +-------------+-------------+
+     * | Magic       | Version     |
+     * | 4 bytes     | 4 bytes     |
+     * +-------------+-------------+
+     */
+
+    private static final int WAL_MAGIC = 0x4451574C; // "DQWL"
+    private static final int WAL_VERSION = 1;
     /*
      * Physical WAL frame:
      *
@@ -28,6 +38,8 @@ public final class FileWriteAheadLog
             Integer.BYTES;
     private static final int LENGTH_CHECKSUM =
             Integer.BYTES;
+    private static final int WAL_HEADER_SIZE =
+            Integer.BYTES + Integer.BYTES;
 
     /*
      * Defensive upper bound.
@@ -103,6 +115,7 @@ public final class FileWriteAheadLog
                             StandardOpenOption.WRITE,
                             StandardOpenOption.APPEND
                     );
+            initializeOrValidateHeader();
 
         } catch (IOException e) {
             throw new WalException(
@@ -110,6 +123,87 @@ public final class FileWriteAheadLog
                     e
             );
         }
+    }
+
+    private void initializeOrValidateHeader() {
+        try {
+            long size =
+                    appendChannel.size();
+
+            if (size == 0) {
+                writeHeader();
+                return;
+            }
+
+            validateHeader();
+
+        } catch (IOException e) {
+            throw new WalException(
+                    "Failed to initialize WAL header: " + path,
+                    e
+            );
+        }
+    }
+
+    private void validateHeader() throws IOException {
+        try (FileChannel channel =
+                     FileChannel.open(
+                             path,
+                             StandardOpenOption.READ
+                     )) {
+
+            ByteBuffer header =
+                    ByteBuffer.allocate(WAL_HEADER_SIZE);
+
+            ReadResult result =
+                    readFully(channel, header);
+
+            if (!result.complete()) {
+                throw new WalException(
+                        "Incomplete WAL header"
+                );
+            }
+
+            header.flip();
+
+            int magic =
+                    header.getInt();
+
+            int version =
+                    header.getInt();
+
+            if (magic != WAL_MAGIC) {
+                throw new WalException(
+                        "Invalid WAL magic"
+                );
+            }
+
+            if (version != WAL_VERSION) {
+                throw new WalException(
+                        "Unsupported WAL version: "
+                                + version
+                );
+            }
+        }
+    }
+
+    private void writeHeader()
+            throws IOException {
+
+        ByteBuffer header =
+                ByteBuffer.allocate(
+                        WAL_HEADER_SIZE
+                );
+
+        header.putInt(WAL_MAGIC);
+        header.putInt(WAL_VERSION);
+        header.flip();
+
+        while (header.hasRemaining()) {
+            appendChannel.write(header);
+        }
+
+        appendChannel.force(true);
     }
 
     @Override
@@ -202,7 +296,9 @@ public final class FileWriteAheadLog
                                 StandardOpenOption.WRITE
                         )
         ) {
-
+            recoveryChannel.position(
+                    WAL_HEADER_SIZE
+            );
             while (true) {
 
                 /*
