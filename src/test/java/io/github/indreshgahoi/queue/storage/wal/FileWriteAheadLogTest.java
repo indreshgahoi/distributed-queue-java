@@ -1,4 +1,4 @@
-package io.github.indreshgahoi.queue.wal;
+package io.github.indreshgahoi.queue.storage.wal;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

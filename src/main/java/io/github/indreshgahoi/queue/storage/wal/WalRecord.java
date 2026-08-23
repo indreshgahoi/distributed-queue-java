@@ -1,4 +1,4 @@
-package io.github.indreshgahoi.queue.wal;
+package io.github.indreshgahoi.queue.storage.wal;
 
 import java.time.Instant;
 

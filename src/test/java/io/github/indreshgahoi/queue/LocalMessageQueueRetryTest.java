@@ -9,16 +9,16 @@ import java.time.Instant;
 import static org.junit.jupiter.api.Assertions.*;
 
 
-public class InMemoryMessageQueueRetryTest {
+public class LocalMessageQueueRetryTest {
 
-    private InMemoryMessageQueue queue;
+    private LocalMessageQueue queue;
     private MutableClock clock;
 
 
     @BeforeEach
     void setUp() {
         clock = new MutableClock(Instant.parse("2026-08-19T10:00:00Z"));
-        queue = new InMemoryMessageQueue(clock, new QueueConfiguration());
+        queue = new LocalMessageQueue(clock, new QueueConfiguration());
     }
 
     @Test

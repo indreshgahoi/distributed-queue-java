@@ -5,11 +5,11 @@ import io.github.indreshgahoi.queue.internal.InFlightMessage;
 import io.github.indreshgahoi.queue.internal.QueueMessage;
 import io.github.indreshgahoi.queue.internal.RecoveryState;
 import io.github.indreshgahoi.queue.internal.RecoveryStatus;
-import io.github.indreshgahoi.queue.wal.InMemoryWriteAheadLog;
-import io.github.indreshgahoi.queue.wal.WalException;
-import io.github.indreshgahoi.queue.wal.WalRecord;
-import io.github.indreshgahoi.queue.wal.WalRecordType;
-import io.github.indreshgahoi.queue.wal.WriteAheadLog;
+import io.github.indreshgahoi.queue.storage.wal.InMemoryWriteAheadLog;
+import io.github.indreshgahoi.queue.storage.wal.WalException;
+import io.github.indreshgahoi.queue.storage.wal.WalRecord;
+import io.github.indreshgahoi.queue.storage.wal.WalRecordType;
+import io.github.indreshgahoi.queue.storage.wal.WriteAheadLog;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -25,7 +25,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 
-public final class InMemoryMessageQueue
+public final class LocalMessageQueue
         implements MessageQueue, AutoCloseable {
 
     private final Deque<QueueMessage> ready =
@@ -54,7 +54,7 @@ public final class InMemoryMessageQueue
      * Uses an in-memory WAL, so this version does NOT
      * survive JVM restart.
      */
-    public InMemoryMessageQueue() {
+    public LocalMessageQueue() {
         this(
                 Clock.systemUTC(),
                 new QueueConfiguration(),
@@ -68,7 +68,7 @@ public final class InMemoryMessageQueue
      *
      * Still non-durable across JVM restart.
      */
-    public InMemoryMessageQueue(Clock clock) {
+    public LocalMessageQueue(Clock clock) {
         this(
                 clock,
                 new QueueConfiguration(),
@@ -80,7 +80,7 @@ public final class InMemoryMessageQueue
      * Allows custom queue configuration while still
      * using an in-memory WAL.
      */
-    public InMemoryMessageQueue(
+    public LocalMessageQueue(
             Clock clock,
             QueueConfiguration config
     ) {
@@ -100,7 +100,7 @@ public final class InMemoryMessageQueue
      * Queue configuration
      * WAL implementation / durability strategy
      */
-    public InMemoryMessageQueue(
+    public LocalMessageQueue(
             Clock clock,
             QueueConfiguration config,
             WriteAheadLog wal

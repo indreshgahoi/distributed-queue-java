@@ -17,10 +17,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class InMemoryMessageQueueConcurrencyTest {
+class LocalMessageQueueConcurrencyTest {
 
     private MutableClock clock;
-    private InMemoryMessageQueue queue;
+    private LocalMessageQueue queue;
 
     @BeforeEach
     void setUp() {
@@ -34,7 +34,7 @@ class InMemoryMessageQueueConcurrencyTest {
                         3
                 );
 
-        queue = new InMemoryMessageQueue(
+        queue = new LocalMessageQueue(
                 clock,
                 config
         );

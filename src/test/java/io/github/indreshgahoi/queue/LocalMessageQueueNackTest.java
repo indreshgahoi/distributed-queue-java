@@ -8,14 +8,14 @@ import java.time.Instant;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class InMemoryMessageQueueNackTest {
+class LocalMessageQueueNackTest {
 
     private static final Duration VISIBILITY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration RETRY_DELAY = Duration.ofSeconds(10);
     private static final int MAX_DELIVERY_ATTEMPTS = 3;
 
     private MutableClock clock;
-    private InMemoryMessageQueue queue;
+    private LocalMessageQueue queue;
 
     @BeforeEach
     void setUp() {
@@ -23,7 +23,7 @@ class InMemoryMessageQueueNackTest {
                 Instant.parse("2026-08-21T00:00:00Z")
         );
 
-        queue = new InMemoryMessageQueue(clock, new QueueConfiguration(
+        queue = new LocalMessageQueue(clock, new QueueConfiguration(
                 VISIBILITY_TIMEOUT,
                 MAX_DELIVERY_ATTEMPTS
         ));

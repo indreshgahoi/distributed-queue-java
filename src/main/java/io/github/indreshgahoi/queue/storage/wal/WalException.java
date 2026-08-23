@@ -1,4 +1,4 @@
-package io.github.indreshgahoi.queue.wal;
+package io.github.indreshgahoi.queue.storage.wal;
 
 public class WalException extends RuntimeException {
     public WalException(String message) {

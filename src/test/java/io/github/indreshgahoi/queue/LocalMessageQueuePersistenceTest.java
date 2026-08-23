@@ -1,10 +1,10 @@
 package io.github.indreshgahoi.queue;
 
-import io.github.indreshgahoi.queue.wal.FileWriteAheadLog;
-import io.github.indreshgahoi.queue.wal.WalException;
-import io.github.indreshgahoi.queue.wal.WalRecord;
-import io.github.indreshgahoi.queue.wal.WalRecordType;
-import io.github.indreshgahoi.queue.wal.WriteAheadLog;
+import io.github.indreshgahoi.queue.storage.wal.FileWriteAheadLog;
+import io.github.indreshgahoi.queue.storage.wal.WalException;
+import io.github.indreshgahoi.queue.storage.wal.WalRecord;
+import io.github.indreshgahoi.queue.storage.wal.WalRecordType;
+import io.github.indreshgahoi.queue.storage.wal.WriteAheadLog;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -17,7 +17,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class InMemoryMessageQueuePersistenceTest {
+class LocalMessageQueuePersistenceTest {
 
     @TempDir
     Path tempDir;
@@ -28,11 +28,11 @@ class InMemoryMessageQueuePersistenceTest {
 
         String messageId;
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             messageId = queue.publish("A");
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             Delivery delivery = recovered.receive().orElseThrow();
 
             assertEquals(messageId, delivery.message().id());
@@ -45,13 +45,13 @@ class InMemoryMessageQueuePersistenceTest {
     void multiplePublishedMessagesRecoverInOriginalOrder() {
         Path walPath = tempDir.resolve("queue.wal");
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             queue.publish("A");
             queue.publish("B");
             queue.publish("C");
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             assertEquals(
                     "A",
                     recovered.receive()
@@ -84,11 +84,11 @@ class InMemoryMessageQueuePersistenceTest {
     void emptyWalRecoversEmptyQueue() {
         Path walPath = tempDir.resolve("queue.wal");
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             assertTrue(queue.receive().isEmpty());
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             assertTrue(recovered.receive().isEmpty());
         }
     }
@@ -99,11 +99,11 @@ class InMemoryMessageQueuePersistenceTest {
 
         String originalMessageId;
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             originalMessageId = queue.publish("payment-created");
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             Delivery delivery = recovered.receive().orElseThrow();
 
             assertEquals(
@@ -117,14 +117,14 @@ class InMemoryMessageQueuePersistenceTest {
     void recoveryDoesNotWriteDuplicatePublishRecords() {
         Path walPath = tempDir.resolve("queue.wal");
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             queue.publish("A");
         }
 
         /*
          * First recovery.
          */
-        try (InMemoryMessageQueue ignored = createQueue(walPath)) {
+        try (LocalMessageQueue ignored = createQueue(walPath)) {
             // Constructor performs recovery.
         }
 
@@ -134,7 +134,7 @@ class InMemoryMessageQueuePersistenceTest {
          * If recovery accidentally calls publish(), the WAL would gain
          * another PUBLISH record every time the queue starts.
          */
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             assertEquals(
                     "A",
                     recovered.receive()
@@ -151,15 +151,15 @@ class InMemoryMessageQueuePersistenceTest {
     void publishAppendsToExistingWalAfterRecovery() {
         Path walPath = tempDir.resolve("queue.wal");
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             queue.publish("A");
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             recovered.publish("B");
         }
 
-        try (InMemoryMessageQueue recoveredAgain = createQueue(walPath)) {
+        try (LocalMessageQueue recoveredAgain = createQueue(walPath)) {
             assertEquals(
                     "A",
                     recoveredAgain.receive()
@@ -187,12 +187,12 @@ class InMemoryMessageQueuePersistenceTest {
         String firstId;
         String secondId;
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             firstId = queue.publish("A");
             secondId = queue.publish("B");
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             Delivery first = recovered.receive().orElseThrow();
             Delivery second = recovered.receive().orElseThrow();
 
@@ -221,8 +221,8 @@ class InMemoryMessageQueuePersistenceTest {
         };
 
         try (
-                InMemoryMessageQueue queue =
-                        new InMemoryMessageQueue(
+                LocalMessageQueue queue =
+                        new LocalMessageQueue(
                                 Clock.systemUTC(),
                                 new QueueConfiguration(),
                                 failingWal
@@ -246,7 +246,7 @@ class InMemoryMessageQueuePersistenceTest {
     void acknowledgedMessageDoesNotReappearAfterRestart() {
         Path walPath = tempDir.resolve("queue.wal");
 
-        try (InMemoryMessageQueue queue = createQueue(walPath)) {
+        try (LocalMessageQueue queue = createQueue(walPath)) {
             queue.publish("A");
 
             Delivery delivery = queue.receive().orElseThrow();
@@ -256,7 +256,7 @@ class InMemoryMessageQueuePersistenceTest {
             );
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath)) {
+        try (LocalMessageQueue recovered = createQueue(walPath)) {
             assertTrue(recovered.receive().isEmpty());
         }
     }
@@ -266,8 +266,8 @@ class InMemoryMessageQueuePersistenceTest {
         FailOnAckWal wal = new FailOnAckWal();
 
         try (
-                InMemoryMessageQueue queue =
-                        new InMemoryMessageQueue(
+                LocalMessageQueue queue =
+                        new LocalMessageQueue(
                                 Clock.systemUTC(),
                                 new QueueConfiguration(),
                                 wal
@@ -309,7 +309,7 @@ class InMemoryMessageQueuePersistenceTest {
         MutableClock clock =
                 new MutableClock(Instant.parse("2026-08-21T10:00:00Z"));
 
-        try (InMemoryMessageQueue queue = createQueue(walPath, clock)) {
+        try (LocalMessageQueue queue = createQueue(walPath, clock)) {
             queue.publish("A");
 
             Delivery delivery = queue.receive().orElseThrow();
@@ -322,7 +322,7 @@ class InMemoryMessageQueuePersistenceTest {
             );
         }
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath, clock)) {
+        try (LocalMessageQueue recovered = createQueue(walPath, clock)) {
             assertTrue(recovered.receive().isEmpty());
 
             assertEquals(
@@ -341,7 +341,7 @@ class InMemoryMessageQueuePersistenceTest {
 
         String messageId;
 
-        try (InMemoryMessageQueue queue = createQueue(walPath, clock)) {
+        try (LocalMessageQueue queue = createQueue(walPath, clock)) {
             messageId = queue.publish("A");
 
             Delivery delivery = queue.receive().orElseThrow();
@@ -354,7 +354,7 @@ class InMemoryMessageQueuePersistenceTest {
 
         clock.advance(Duration.ofSeconds(30));
 
-        try (InMemoryMessageQueue recovered = createQueue(walPath, clock)) {
+        try (LocalMessageQueue recovered = createQueue(walPath, clock)) {
             assertEquals(
                     1,
                     recovered.makeDelayedMessagesReady()
@@ -377,8 +377,8 @@ class InMemoryMessageQueuePersistenceTest {
         FailOnNackWal wal = new FailOnNackWal();
 
         try (
-                InMemoryMessageQueue queue =
-                        new InMemoryMessageQueue(
+                LocalMessageQueue queue =
+                        new LocalMessageQueue(
                                 Clock.systemUTC(),
                                 new QueueConfiguration(),
                                 wal
@@ -418,7 +418,7 @@ class InMemoryMessageQueuePersistenceTest {
 
         String messageId;
 
-        try (InMemoryMessageQueue queue =
+        try (LocalMessageQueue queue =
                      createQueue(walPath, clock)) {
 
             messageId = queue.publish("A");
@@ -466,7 +466,7 @@ class InMemoryMessageQueuePersistenceTest {
          * nextAttempt = 3
          * retryAt = currentTime + 20s
          */
-        try (InMemoryMessageQueue recovered =
+        try (LocalMessageQueue recovered =
                      createQueue(walPath, clock)) {
 
             // It must not be READY yet.
@@ -535,7 +535,7 @@ class InMemoryMessageQueuePersistenceTest {
 
         String messageId;
 
-        try (InMemoryMessageQueue queue =
+        try (LocalMessageQueue queue =
                      createQueue(walPath, clock)) {
             messageId = queue.publish("A");
 
@@ -580,7 +580,7 @@ class InMemoryMessageQueuePersistenceTest {
 
         }
 
-        try (InMemoryMessageQueue queue =
+        try (LocalMessageQueue queue =
                      createQueue(walPath, clock)) {
             assertTrue(queue.receive().isEmpty());
         }
@@ -596,7 +596,7 @@ class InMemoryMessageQueuePersistenceTest {
                         Instant.parse("2026-08-22T00:00:00Z")
                 );
         String messageId;
-        try (InMemoryMessageQueue queue = createQueue(walPath, clock)) {
+        try (LocalMessageQueue queue = createQueue(walPath, clock)) {
             messageId = queue.publish("A");
 
             Delivery first = queue.receive().orElseThrow();
@@ -612,7 +612,7 @@ class InMemoryMessageQueuePersistenceTest {
             );
 
         }
-        try (InMemoryMessageQueue recovered = createQueue(walPath, clock)) {
+        try (LocalMessageQueue recovered = createQueue(walPath, clock)) {
             Delivery redelivery = recovered.receive().orElseThrow();
             assertEquals(
                     messageId,
@@ -637,8 +637,8 @@ class InMemoryMessageQueuePersistenceTest {
                         Instant.parse("2026-08-22T00:00:00Z")
                 );
 
-        try (InMemoryMessageQueue queue =
-                     new InMemoryMessageQueue(
+        try (LocalMessageQueue queue =
+                     new LocalMessageQueue(
                              clock,
                              new QueueConfiguration(),
                              wal
@@ -688,7 +688,7 @@ class InMemoryMessageQueuePersistenceTest {
         QueueConfiguration config =
                 new QueueConfiguration();
 
-        try (InMemoryMessageQueue queue =
+        try (LocalMessageQueue queue =
                      createQueue(walPath, clock)) {
 
             messageId = queue.publish("A");
@@ -731,7 +731,7 @@ class InMemoryMessageQueuePersistenceTest {
          *
          * READY attempt=3
          */
-        try (InMemoryMessageQueue recovered =
+        try (LocalMessageQueue recovered =
                      createQueue(walPath, clock)) {
 
             Delivery third =
@@ -764,7 +764,7 @@ class InMemoryMessageQueuePersistenceTest {
         QueueConfiguration config =
                 new QueueConfiguration();
 
-        try (InMemoryMessageQueue queue =
+        try (LocalMessageQueue queue =
                      createQueue(walPath, clock)) {
 
             queue.publish("poison");
@@ -823,7 +823,7 @@ class InMemoryMessageQueuePersistenceTest {
             );
         }
 
-        try (InMemoryMessageQueue recovered =
+        try (LocalMessageQueue recovered =
                      createQueue(walPath, clock)) {
 
             assertEquals(
@@ -850,8 +850,8 @@ class InMemoryMessageQueuePersistenceTest {
         QueueConfiguration config =
                 new QueueConfiguration();
 
-        try (InMemoryMessageQueue queue =
-                     new InMemoryMessageQueue(
+        try (LocalMessageQueue queue =
+                     new LocalMessageQueue(
                              clock,
                              config,
                              wal
@@ -897,7 +897,7 @@ class InMemoryMessageQueuePersistenceTest {
         QueueConfiguration config =
                 new QueueConfiguration();
 
-        try (InMemoryMessageQueue queue =
+        try (LocalMessageQueue queue =
                      createQueue(walPath, clock)) {
 
             queue.publish("poison");
@@ -951,7 +951,7 @@ class InMemoryMessageQueuePersistenceTest {
          * Recovery must consume the durable DEAD_LETTER decision,
          * not derive a retry from the previous state.
          */
-        try (InMemoryMessageQueue recovered =
+        try (LocalMessageQueue recovered =
                      createQueue(walPath, clock)) {
 
             assertEquals(
@@ -978,8 +978,8 @@ class InMemoryMessageQueuePersistenceTest {
         QueueConfiguration config =
                 new QueueConfiguration();
 
-        try (InMemoryMessageQueue queue =
-                     new InMemoryMessageQueue(
+        try (LocalMessageQueue queue =
+                     new LocalMessageQueue(
                              clock,
                              config,
                              wal
@@ -1068,8 +1068,8 @@ class InMemoryMessageQueuePersistenceTest {
         QueueConfiguration config =
                 new QueueConfiguration();
 
-        try (InMemoryMessageQueue queue =
-                     new InMemoryMessageQueue(
+        try (LocalMessageQueue queue =
+                     new LocalMessageQueue(
                              clock,
                              config,
                              wal
@@ -1129,16 +1129,16 @@ class InMemoryMessageQueuePersistenceTest {
         }
     }
 
-    private InMemoryMessageQueue createQueue(Path walPath) {
-        return new InMemoryMessageQueue(
+    private LocalMessageQueue createQueue(Path walPath) {
+        return new LocalMessageQueue(
                 Clock.systemUTC(),
                 new QueueConfiguration(),
                 new FileWriteAheadLog(walPath)
         );
     }
 
-    private InMemoryMessageQueue createQueue(Path walPath, Clock clock) {
-        return new InMemoryMessageQueue(
+    private LocalMessageQueue createQueue(Path walPath, Clock clock) {
+        return new LocalMessageQueue(
                 clock,
                 new QueueConfiguration(),
                 new FileWriteAheadLog(walPath)

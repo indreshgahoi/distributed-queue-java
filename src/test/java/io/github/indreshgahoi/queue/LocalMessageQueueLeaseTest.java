@@ -10,15 +10,15 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 
-class InMemoryMessageQueueLeaseTest {
+class LocalMessageQueueLeaseTest {
 
-    private InMemoryMessageQueue queue;
+    private LocalMessageQueue queue;
     private MutableClock clock;
 
     @BeforeEach
     void setUp() {
         clock = new MutableClock(Instant.parse("2026-08-19T10:00:00Z"));
-        queue = new InMemoryMessageQueue(clock);
+        queue = new LocalMessageQueue(clock);
     }
 
     @Test

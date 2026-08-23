@@ -4,11 +4,11 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class InMemoryMessageQueueTest {
+class LocalMessageQueueTest {
 
     @Test
     void publishedMessageCanBeReceived() {
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
 
         String messageId = queue.publish("hello");
 
@@ -21,7 +21,7 @@ class InMemoryMessageQueueTest {
     @Test
     void messagesAreReceivedInFifoOrder() {
 
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
 
         queue.publish("A");
         queue.publish("B");
@@ -36,7 +36,7 @@ class InMemoryMessageQueueTest {
     @Test
     void receiveFromEmptyQueueReturnsEmpty(){
 
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
 
         assertTrue(queue.receive().isEmpty());
 
@@ -44,7 +44,7 @@ class InMemoryMessageQueueTest {
 
     @Test
     void receivedMessageIsRemovedFromQueue() {
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
 
         queue.publish("A");
 
@@ -55,7 +55,7 @@ class InMemoryMessageQueueTest {
 
     @Test
     void receivedMessageMovesToInFlight() {
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
 
         queue.publish("A");
 
@@ -68,7 +68,7 @@ class InMemoryMessageQueueTest {
 
     @Test
     void ackRemovesInFlightMessage() {
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
 
         queue.publish("A");
 
@@ -80,14 +80,14 @@ class InMemoryMessageQueueTest {
 
     @Test
     void ackOfUnknownMessageReturnsFalse() {
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
 
         assertFalse(queue.ack("unknown"));
     }
 
     @Test
     void receiveReturnsReceiptHandle() {
-        MessageQueue queue = new InMemoryMessageQueue();
+        MessageQueue queue = new LocalMessageQueue();
         queue.publish("A");
 
         Delivery delivery = queue.receive().orElseThrow();
