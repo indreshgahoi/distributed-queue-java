@@ -1588,3 +1588,113 @@ Snapshot creation is currently an optimization.
 Until WAL compaction is introduced, failure to replace a snapshot must not
 make the queue unrecoverable because the complete WAL remains available.
 
+## v0.12.4 — Safe WAL Compaction / History Reclamation.
+### Motivation
+In current implementation, WAL grows indefinitely on disk even when the in-memory queue size remain bounded. 
+Now that we have snapshot, Disk space must be reclaimed by deleting the WAL suffix.
+This is the first phase where mistake can cause the real data loss, so design the rule.
+> Delete WAL history only after a newly authoritative snapshot make the history unnecessary for recovery.  
+## v0.12.4 — Safe WAL Compaction Boundary
+
+### G116 — Only an authoritative snapshot may define a compaction boundary
+
+Temporary, candidate, incomplete, or failed snapshots must never advance
+the compaction point.
+
+Only the snapshot returned by `loadLatest()` may be considered authoritative.
+
+### G117 — Snapshot WalPosition defines the maximum reclaimable history
+
+For an authoritative snapshot:
+
+    WalPosition(segmentId, offset)
+
+all WAL history logically represented by the snapshot is eligible for
+future reclamation.
+
+The snapshot position is an exclusive boundary:
+
+    history before P    -> represented by snapshot
+    history from P      -> required WAL suffix
+
+### G118 — Compaction must never delete the WAL suffix
+
+Records at or after the snapshot WalPosition are required for recovery and
+must remain available.
+
+Recovery invariant:
+
+    snapshot
+    +
+    WAL suffix from snapshot.walPosition()
+    =
+    current logical state
+
+### G119 — Snapshot promotion must precede compaction
+
+Required ordering:
+
+    capture snapshot
+        |
+        v
+    persist candidate
+        |
+        v
+    force candidate
+        |
+        v
+    atomic promotion
+        |
+        v
+    snapshot authoritative
+        |
+        v
+    compaction may begin
+
+Compaction must never run against an uncommitted candidate snapshot.
+
+### G120 — Compaction failure must preserve recoverability
+
+Compaction may reclaim less history than intended.
+
+It must never reclaim more history than allowed by the authoritative snapshot.
+
+Partial cleanup is acceptable only when:
+
+    authoritative snapshot
+    +
+    remaining WAL suffix
+
+still forms a complete recovery path.
+
+### G121 — Compaction boundary is monotonic
+
+A compaction boundary may stay unchanged or advance.
+
+It must never move backward.
+
+Example:
+
+    current = (segment 7, offset 100)
+
+valid:
+(7, 100)
+(7, 500)
+(8, 200)
+
+invalid:
+(6, 900)
+(7, 50)
+
+### G122 — Current single-segment implementation does not reclaim WAL prefixes
+
+Until WAL segmentation is implemented, v0.12.4 determines safe compaction
+boundaries but does not rewrite or remove arbitrary bytes from the active WAL.
+
+### G123 — Recovery correctness takes priority over space reclamation
+
+If there is uncertainty whether history is covered by an authoritative
+snapshot, that history must be retained.
+
+Compaction must fail safe toward retaining data.
+

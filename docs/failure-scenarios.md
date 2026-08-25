@@ -596,4 +596,202 @@ itself succeeds.
                                v            v
                               S1            S2
 ```
+## F22 — WAL Is Compacted Before Snapshot Promotion
 
+### Sequence
+
+Existing recovery path:
+
+    S1 + WAL
+
+A newer snapshot S2 is being created.
+
+Incorrect implementation performs:
+
+    capture S2
+        |
+        v
+    delete WAL history covered by S2
+        |
+        v
+    promote S2
+        |
+      FAILURE
+
+### Result
+
+The old WAL history has already been removed.
+
+S2 is not authoritative.
+
+Recovery may no longer have a complete source of state.
+
+### Required Behavior
+
+Compaction must only begin after S2 has been successfully promoted.
+
+Required order:
+
+    durable candidate
+    -> atomic promotion
+    -> compaction
+## F23 — Compaction Crosses the Snapshot Boundary
+
+### State
+
+Snapshot:
+
+    WalPosition(7, 1200)
+
+Recovery requires:
+
+    snapshot
+    +
+    WAL from (7, 1200)
+
+### Failure
+
+Compaction accidentally removes history through:
+
+    (7, 1800)
+
+Records between 1200 and 1800 existed after the snapshot and are not
+represented in it.
+
+### Result
+
+Recovery silently loses state transitions.
+
+### Required Behavior
+
+No history at or after the authoritative snapshot position may be reclaimed.
+
+## F24 — Temporary Snapshot Advances Compaction Point
+
+### Sequence
+
+S1 is authoritative.
+
+S2.tmp contains:
+
+    WalPosition(9, 500)
+
+but S2 promotion has not completed.
+
+Compaction incorrectly reads the temporary candidate and deletes old WAL
+segments.
+
+The process then crashes before S2 becomes authoritative.
+
+### Required Behavior
+
+Temporary snapshot files must never participate in compaction decisions.
+
+Only the committed snapshot path is authoritative.
+
+## F25 — Compaction Fails After Deleting Some Eligible History
+
+### Future segmented example
+
+Authoritative snapshot:
+
+    WalPosition(7, 1200)
+
+Eligible segments:
+
+    segment-1
+    segment-2
+    segment-3
+    segment-4
+    segment-5
+    segment-6
+
+Compaction deletes:
+
+    segment-1
+    segment-2
+    segment-3
+
+then filesystem operation fails.
+
+### Required Behavior
+
+Recovery must remain valid.
+
+Deleting only a subset of eligible history is safe.
+
+The system may retry remaining cleanup later.
+
+### Principle
+
+Compaction progress need not be atomic.
+
+Compaction safety must be atomic with respect to the recovery boundary.
+
+## F26 — Stale Snapshot Produces Older Compaction Point
+
+Current compaction point:
+
+    WalPosition(8, 100)
+
+A stale snapshot appears with:
+
+    WalPosition(7, 500)
+
+### Risk
+
+If the implementation treats every snapshot as authoritative without
+monotonicity checks, storage lifecycle becomes inconsistent.
+
+### Required Behavior
+
+Compaction position must never move backward.
+
+A stale snapshot must not resurrect or redefine already reclaimed history.
+
+## F27 — Snapshot/WAL Position Mismatch
+
+Snapshot claims:
+
+    WalPosition(12, 500)
+
+Available WAL only contains:
+
+    segment 0
+
+or the referenced position is not a valid frame boundary.
+
+### Possible Causes
+
+- snapshot copied from another WAL;
+- stale files mixed together;
+- manual filesystem modification;
+- implementation bug.
+
+### Required Behavior
+
+Do not compact.
+
+Fail recovery/compaction validation explicitly.
+
+Never infer a safe deletion boundary from an invalid WalPosition.
+
+## F28 — Compaction Deletes an Active WAL Segment
+
+Writer is currently appending to:
+
+    segment-8
+
+Snapshot covers:
+
+    segment-7
+
+Compaction incorrectly treats segment-8 as reclaimable because of a race
+or stale segment metadata.
+
+### Required Behavior
+
+The active WAL segment is never eligible for deletion.
+
+Only immutable, fully closed segments strictly older than the snapshot's
+segment boundary may eventually be reclaimed.
