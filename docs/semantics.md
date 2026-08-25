@@ -1474,3 +1474,117 @@ This policy must not be accidental.
             |          |           |
           READY    IN_FLIGHT    DELAYED/DLQ
 ```
+## v0.12.3 — Crash-Safe Snapshot Replacement
+
+### G109 — Snapshot replacement never destroys the previous recovery point first
+
+A new snapshot must be written to a separate candidate file.
+
+The current valid snapshot must not be truncated or overwritten while the
+candidate is being constructed.
+
+### G110 — Candidate snapshot must cross its durability boundary before promotion
+
+Required order:
+
+    write candidate
+        |
+        v
+    force candidate
+        |
+        v
+    promote candidate
+        |
+        v
+    new snapshot becomes authoritative
+
+### G111 — Failed candidate creation preserves the previous snapshot
+
+If writing or forcing the candidate fails:
+
+    previous snapshot remains authoritative
+    candidate is discarded or ignored
+
+### G112 — Failed promotion must not be reported as successful replacement
+
+If candidate promotion fails, save() must fail.
+
+The store must not claim that the new snapshot became authoritative.
+
+### G113 — Stray temporary snapshots are not authoritative
+
+A `.tmp` or candidate snapshot left by a failed/crashed save must never
+automatically supersede `snapshot.dat`.
+
+### G114 — Successful replacement exposes exactly one authoritative snapshot
+
+After successful save(S2):
+
+    loadLatest() -> S2
+
+The previous S1 must no longer be returned.
+
+### G115 — Snapshot save failure does not affect WAL recoverability
+
+Snapshot creation is currently an optimization.
+
+Until WAL compaction is introduced, failure to replace a snapshot must not
+make the queue unrecoverable because the complete WAL remains available.
+
+## v0.12.3 — Crash-Safe Snapshot Replacement
+
+### G109 — Snapshot replacement never destroys the previous recovery point first
+
+A new snapshot must be written to a separate candidate file.
+
+The current valid snapshot must not be truncated or overwritten while the
+candidate is being constructed.
+
+### G110 — Candidate snapshot must cross its durability boundary before promotion
+
+Required order:
+
+    write candidate
+        |
+        v
+    force candidate
+        |
+        v
+    promote candidate
+        |
+        v
+    new snapshot becomes authoritative
+
+### G111 — Failed candidate creation preserves the previous snapshot
+
+If writing or forcing the candidate fails:
+
+    previous snapshot remains authoritative
+    candidate is discarded or ignored
+
+### G112 — Failed promotion must not be reported as successful replacement
+
+If candidate promotion fails, save() must fail.
+
+The store must not claim that the new snapshot became authoritative.
+
+### G113 — Stray temporary snapshots are not authoritative
+
+A `.tmp` or candidate snapshot left by a failed/crashed save must never
+automatically supersede `snapshot.dat`.
+
+### G114 — Successful replacement exposes exactly one authoritative snapshot
+
+After successful save(S2):
+
+    loadLatest() -> S2
+
+The previous S1 must no longer be returned.
+
+### G115 — Snapshot save failure does not affect WAL recoverability
+
+Snapshot creation is currently an optimization.
+
+Until WAL compaction is introduced, failure to replace a snapshot must not
+make the queue unrecoverable because the complete WAL remains available.
+

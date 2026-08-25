@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -784,6 +785,383 @@ class FileQueueSnapshotStoreTest {
         );
     }
 
+    //---------------------------------------------------------------------
+    //            Test cases for crash safe snapshot replacement
+    //------------------------------------------------------------------------
+    @Test
+    void candidateWriteFailurePreservesPreviousSnapshot() {
+        Path snapshotPath =
+                tempDir.resolve("queue.snapshot");
+
+        QueueSnapshot first =
+                snapshot(
+                        new WalPosition(0, 100),
+                        "first"
+                );
+
+        QueueSnapshot second =
+                snapshot(
+                        new WalPosition(0, 200),
+                        "second"
+                );
+
+        /*
+         * First create S1 successfully using normal store.
+         */
+        new FileQueueSnapshotStore(
+                snapshotPath
+        ).save(first);
+
+        /*
+         * New store simulates failure while writing S2 candidate.
+         */
+        FileQueueSnapshotStore failingStore =
+                new FileQueueSnapshotStore(
+                        snapshotPath,
+                        (candidate, data) -> {
+                            /*
+                             * Write some bytes so this really models
+                             * partial candidate creation.
+                             */
+                            try (FileChannel channel =
+                                         FileChannel.open(
+                                                 candidate,
+                                                 StandardOpenOption.CREATE,
+                                                 StandardOpenOption.WRITE,
+                                                 StandardOpenOption.TRUNCATE_EXISTING
+                                         )) {
+
+                                int bytesToWrite =
+                                        Math.min(
+                                                8,
+                                                data.remaining()
+                                        );
+
+                                int originalLimit =
+                                        data.limit();
+
+                                data.limit(
+                                        data.position()
+                                                + bytesToWrite
+                                );
+
+                                while (data.hasRemaining()) {
+                                    channel.write(data);
+                                }
+
+                                data.limit(originalLimit);
+                            }
+
+                            throw new IOException(
+                                    "Simulated candidate write failure"
+                            );
+                        },
+                        FileQueueSnapshotStore::forceCandidate,
+                        FileQueueSnapshotStore::promoteCandidate
+                );
+
+        assertThrows(
+                SnapshotException.class,
+                () -> failingStore.save(second)
+        );
+
+        /*
+         * S1 must still be authoritative.
+         */
+        QueueSnapshot recovered =
+                new FileQueueSnapshotStore(
+                        snapshotPath
+                )
+                        .loadLatest()
+                        .orElseThrow();
+
+        assertEquals(
+                first,
+                recovered
+        );
+    }
+
+
+    @Test
+    void candidateForceFailurePreservesPreviousSnapshot() {
+        Path snapshotPath =
+                tempDir.resolve("queue.snapshot");
+
+        QueueSnapshot first =
+                snapshot(
+                        new WalPosition(0, 100),
+                        "first"
+                );
+
+        QueueSnapshot second =
+                snapshot(
+                        new WalPosition(0, 200),
+                        "second"
+                );
+
+        new FileQueueSnapshotStore(
+                snapshotPath
+        ).save(first);
+
+        FileQueueSnapshotStore failingStore =
+                new FileQueueSnapshotStore(
+                        snapshotPath,
+
+                        /*
+                         * Candidate bytes are written successfully.
+                         */
+                        FileQueueSnapshotStore::writeCandidate,
+
+                        /*
+                         * But durability establishment fails.
+                         */
+                        candidate -> {
+                            throw new IOException(
+                                    "Simulated force failure"
+                            );
+                        },
+
+                        FileQueueSnapshotStore::promoteCandidate
+                );
+
+        assertThrows(
+                SnapshotException.class,
+                () -> failingStore.save(second)
+        );
+
+        QueueSnapshot recovered =
+                new FileQueueSnapshotStore(
+                        snapshotPath
+                )
+                        .loadLatest()
+                        .orElseThrow();
+
+        assertEquals(
+                first,
+                recovered
+        );
+    }
+
+    @Test
+    void promotionFailurePreservesPreviousSnapshot() {
+        Path snapshotPath =
+                tempDir.resolve("queue.snapshot");
+
+        QueueSnapshot first =
+                snapshot(
+                        new WalPosition(0, 100),
+                        "first"
+                );
+
+        QueueSnapshot second =
+                snapshot(
+                        new WalPosition(0, 200),
+                        "second"
+                );
+
+        new FileQueueSnapshotStore(
+                snapshotPath
+        ).save(first);
+
+        FileQueueSnapshotStore failingStore =
+                new FileQueueSnapshotStore(
+                        snapshotPath,
+                        FileQueueSnapshotStore::writeCandidate,
+                        FileQueueSnapshotStore::forceCandidate,
+
+                        /*
+                         * Candidate is fully written and forced,
+                         * but publication fails.
+                         */
+                        (candidate, destination) -> {
+                            throw new IOException(
+                                    "Simulated promotion failure"
+                            );
+                        }
+                );
+
+        assertThrows(
+                SnapshotException.class,
+                () -> failingStore.save(second)
+        );
+
+        QueueSnapshot recovered =
+                new FileQueueSnapshotStore(
+                        snapshotPath
+                )
+                        .loadLatest()
+                        .orElseThrow();
+
+        assertEquals(
+                first,
+                recovered
+        );
+    }
+
+    @Test
+    void failedSaveDoesNotReportNewSnapshotAsLatest() {
+        Path snapshotPath =
+                tempDir.resolve("queue.snapshot");
+
+        QueueSnapshot first =
+                snapshot(
+                        new WalPosition(0, 100),
+                        "first"
+                );
+
+        QueueSnapshot second =
+                snapshot(
+                        new WalPosition(0, 200),
+                        "second"
+                );
+
+        FileQueueSnapshotStore normalStore =
+                new FileQueueSnapshotStore(
+                        snapshotPath
+                );
+
+        normalStore.save(first);
+
+        FileQueueSnapshotStore failingStore =
+                new FileQueueSnapshotStore(
+                        snapshotPath,
+                        FileQueueSnapshotStore::writeCandidate,
+                        FileQueueSnapshotStore::forceCandidate,
+                        (candidate, destination) -> {
+                            throw new IOException(
+                                    "Simulated promotion failure"
+                            );
+                        }
+                );
+
+        assertThrows(
+                SnapshotException.class,
+                () -> failingStore.save(second)
+        );
+
+        Optional<QueueSnapshot> latest =
+                normalStore.loadLatest();
+
+        assertTrue(
+                latest.isPresent()
+        );
+
+        assertEquals(
+                first,
+                latest.orElseThrow()
+        );
+
+        assertNotEquals(
+                second,
+                latest.orElseThrow()
+        );
+    }
+
+    @Test
+    void successfulReplacementMakesNewSnapshotAuthoritative() {
+        Path snapshotPath =
+                tempDir.resolve("queue.snapshot");
+
+        QueueSnapshot first =
+                snapshot(
+                        new WalPosition(0, 100),
+                        "first"
+                );
+
+        QueueSnapshot second =
+                snapshot(
+                        new WalPosition(0, 200),
+                        "second"
+                );
+
+        FileQueueSnapshotStore store =
+                new FileQueueSnapshotStore(
+                        snapshotPath
+                );
+
+        store.save(first);
+
+        assertEquals(
+                first,
+                store.loadLatest()
+                        .orElseThrow()
+        );
+
+        store.save(second);
+
+        QueueSnapshot recovered =
+                store.loadLatest()
+                        .orElseThrow();
+
+        assertEquals(
+                second,
+                recovered
+        );
+
+        assertNotEquals(
+                first,
+                recovered
+        );
+    }
+
+    @Test
+    void leftoverTempFileDoesNotOverrideCommittedSnapshot()
+            throws IOException {
+
+        Path snapshotPath =
+                tempDir.resolve("queue.snapshot");
+
+        QueueSnapshot committed =
+                snapshot(
+                        new WalPosition(0, 100),
+                        "committed"
+                );
+
+        FileQueueSnapshotStore store =
+                new FileQueueSnapshotStore(
+                        snapshotPath
+                );
+
+        store.save(committed);
+
+        /*
+         * Simulate garbage left behind by a crashed
+         * candidate save.
+         */
+        Path tempPath =
+                snapshotPath.resolveSibling(
+                        snapshotPath.getFileName()
+                                + ".tmp"
+                );
+
+        Files.write(
+                tempPath,
+                new byte[]{
+                        1, 2, 3, 4, 5, 6
+                }
+        );
+
+        /*
+         * loadLatest() must only trust the committed path.
+         *
+         * A .tmp file is never authoritative merely because
+         * it happens to exist.
+         */
+        QueueSnapshot recovered =
+                store.loadLatest()
+                        .orElseThrow();
+
+        assertEquals(
+                committed,
+                recovered
+        );
+
+        assertTrue(
+                Files.exists(tempPath)
+        );
+    }
+
+
     private QueueSnapshot completeSnapshot(
             WalPosition position
     ) {
@@ -823,6 +1201,25 @@ class FileQueueSnapshotStoreTest {
                                 "dead-payload"
                         )
                 )
+        );
+    }
+
+    private QueueSnapshot snapshot(
+            WalPosition position,
+            String payload
+    ) {
+        return new QueueSnapshot(
+                position,
+                List.of(
+                        new ReadySnapshotEntry(
+                                "message-" + payload,
+                                payload,
+                                1
+                        )
+                ),
+                List.of(),
+                List.of(),
+                List.of()
         );
     }
 

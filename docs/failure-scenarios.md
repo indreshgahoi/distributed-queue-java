@@ -525,3 +525,75 @@ If LEASE_STARTED cannot be made durable:
 ### Principle
 
 A failed durable transition must leave the previous authoritative state intact.
+
+## F19 — Crash While Writing Candidate Snapshot
+
+Existing:
+
+    snapshot.dat = S1
+
+Process begins:
+
+    snapshot.tmp = partial S2
+
+Then crashes.
+
+Required recovery:
+
+    loadLatest() -> S1
+
+The partial candidate must not replace S1.
+
+
+## F20 — Candidate force fails
+
+Existing:
+
+    snapshot.dat = S1
+
+Candidate bytes may have been written, but the durability operation fails.
+
+Required behavior:
+
+    save(S2) fails
+    S1 remains authoritative
+    no later code may assume S2 became durable
+
+
+## F21 — Promotion fails
+
+Candidate S2 is complete and durable, but rename/replacement fails.
+
+Required behavior:
+
+    save(S2) fails
+
+The system must not report successful snapshot replacement unless promotion
+itself succeeds.
+```text
+                S1 AUTHORITATIVE
+                       |
+                 create candidate S2
+                       |
+                 +-----+------+
+                 |            |
+               FAIL         complete
+                 |            |
+                 v            v
+                S1        force S2
+                              |
+                        +-----+------+
+                        |            |
+                      FAIL         durable
+                        |            |
+                        v            v
+                       S1         promote
+                                     |
+                               +-----+------+
+                               |            |
+                             FAIL         success
+                               |            |
+                               v            v
+                              S1            S2
+```
+

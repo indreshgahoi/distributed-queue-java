@@ -6,7 +6,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -36,9 +35,13 @@ public final class FileQueueSnapshotStore
     private static final int CHECKSUM_BYTES =
             Integer.BYTES;
 
+    /*
+     * magic   = 4 bytes
+     * version = 4 bytes
+     */
     private static final int HEADER_BYTES =
-            Integer.BYTES   // magic
-                    + Integer.BYTES; // version
+            Integer.BYTES
+                    + Integer.BYTES;
 
     private static final int MAX_SNAPSHOT_SIZE =
             128 * 1024 * 1024;
@@ -49,8 +52,36 @@ public final class FileQueueSnapshotStore
     private final Path snapshotPath;
     private final Path tempPath;
 
+    /*
+     * Failure-injection seams.
+     *
+     * Production uses the real filesystem implementations.
+     * Tests may inject deterministic failures at each stage.
+     */
+    private final CandidateWriter candidateWriter;
+    private final CandidateForcer candidateForcer;
+    private final SnapshotPromoter snapshotPromoter;
+
     public FileQueueSnapshotStore(
             Path snapshotPath
+    ) {
+        this(
+                snapshotPath,
+                FileQueueSnapshotStore::writeCandidate,
+                FileQueueSnapshotStore::forceCandidate,
+                FileQueueSnapshotStore::promoteCandidate
+        );
+    }
+
+    /*
+     * Package-private constructor for deterministic
+     * storage-failure tests.
+     */
+    FileQueueSnapshotStore(
+            Path snapshotPath,
+            CandidateWriter candidateWriter,
+            CandidateForcer candidateForcer,
+            SnapshotPromoter snapshotPromoter
     ) {
         this.snapshotPath =
                 Objects.requireNonNull(
@@ -62,6 +93,24 @@ public final class FileQueueSnapshotStore
                 snapshotPath.resolveSibling(
                         snapshotPath.getFileName()
                                 + ".tmp"
+                );
+
+        this.candidateWriter =
+                Objects.requireNonNull(
+                        candidateWriter,
+                        "candidateWriter"
+                );
+
+        this.candidateForcer =
+                Objects.requireNonNull(
+                        candidateForcer,
+                        "candidateForcer"
+                );
+
+        this.snapshotPromoter =
+                Objects.requireNonNull(
+                        snapshotPromoter,
+                        "snapshotPromoter"
                 );
     }
 
@@ -88,16 +137,24 @@ public final class FileQueueSnapshotStore
         }
 
         int checksum =
-                calculateChecksum(payload);
+                calculateChecksum(
+                        payload
+                );
 
         /*
          * Physical snapshot format:
          *
-         * [magic]
-         * [version]
-         * [payloadLength]
-         * [payload]
-         * [checksum]
+         * +---------------+
+         * | magic         | 4 bytes
+         * +---------------+
+         * | version       | 4 bytes
+         * +---------------+
+         * | payloadLength | 4 bytes
+         * +---------------+
+         * | payload       | N bytes
+         * +---------------+
+         * | CRC32C        | 4 bytes
+         * +---------------+
          */
         ByteBuffer buffer =
                 ByteBuffer.allocate(
@@ -131,33 +188,52 @@ public final class FileQueueSnapshotStore
 
         try {
             /*
-             * IMPORTANT:
+             * Stage 1
              *
-             * Do not overwrite snapshotPath directly.
+             * Construct S2 separately.
              *
-             * The previous snapshot remains valid while
-             * the new snapshot is being created.
+             * Existing snapshotPath (S1) is untouched.
              */
-            writeTempSnapshot(
+            candidateWriter.write(
+                    tempPath,
                     buffer
             );
 
-            replaceSnapshotAtomically();
+            /*
+             * Stage 2
+             *
+             * Establish candidate durability BEFORE
+             * making it authoritative.
+             */
+            candidateForcer.force(
+                    tempPath
+            );
+
+            /*
+             * Stage 3
+             *
+             * Atomically publish S2 as the authoritative
+             * snapshot.
+             *
+             * Only after this operation succeeds may
+             * save() report success.
+             */
+            snapshotPromoter.promote(
+                    tempPath,
+                    snapshotPath
+            );
 
         } catch (IOException e) {
 
             /*
-             * Best effort cleanup.
+             * Candidate creation/promotion failed.
              *
-             * Existing snapshotPath must remain untouched.
+             * Best-effort cleanup of temporary state.
+             *
+             * snapshotPath must remain the previous
+             * authoritative recovery point.
              */
-            try {
-                Files.deleteIfExists(
-                        tempPath
-                );
-            } catch (IOException ignored) {
-                // Preserve original failure.
-            }
+            deleteCandidateBestEffort();
 
             throw new SnapshotException(
                     "Failed to save queue snapshot",
@@ -168,6 +244,11 @@ public final class FileQueueSnapshotStore
 
     @Override
     public synchronized Optional<QueueSnapshot> loadLatest() {
+        /*
+         * tempPath is intentionally ignored.
+         *
+         * A leftover candidate is never authoritative.
+         */
         if (!Files.exists(snapshotPath)) {
             return Optional.empty();
         }
@@ -180,7 +261,7 @@ public final class FileQueueSnapshotStore
                         )
         ) {
             /*
-             * Read fixed prefix:
+             * Read:
              *
              * magic
              * version
@@ -238,7 +319,11 @@ public final class FileQueueSnapshotStore
             );
 
             /*
-             * Snapshot must contain no unexpected trailing bytes.
+             * The snapshot format allows exactly one
+             * complete snapshot object.
+             *
+             * Any bytes after CRC indicate malformed/
+             * unexpected data.
              */
             ByteBuffer extra =
                     ByteBuffer.allocate(1);
@@ -267,6 +352,10 @@ public final class FileQueueSnapshotStore
                             payload
                     );
 
+            /*
+             * Structurally complete snapshot with a
+             * checksum mismatch is corruption.
+             */
             if (storedChecksum
                     != calculatedChecksum) {
 
@@ -275,6 +364,10 @@ public final class FileQueueSnapshotStore
                 );
             }
 
+            /*
+             * Only deserialize after integrity
+             * verification succeeds.
+             */
             String serialized =
                     new String(
                             payload,
@@ -282,7 +375,9 @@ public final class FileQueueSnapshotStore
                     );
 
             return Optional.of(
-                    deserialize(serialized)
+                    deserialize(
+                            serialized
+                    )
             );
 
         } catch (IOException e) {
@@ -293,61 +388,99 @@ public final class FileQueueSnapshotStore
         }
     }
 
-    private void writeTempSnapshot(
-            ByteBuffer buffer
+    /*
+     * Production candidate writer.
+     *
+     * Important:
+     * This only constructs the candidate.
+     *
+     * Durability is established separately through
+     * CandidateForcer so tests can independently
+     * simulate:
+     *
+     * write success + force failure.
+     */
+    static void writeCandidate(
+            Path candidate,
+            ByteBuffer data
     ) throws IOException {
 
-        /*
-         * CREATE + TRUNCATE is safe here because this
-         * is only the temporary candidate snapshot.
-         */
         try (
                 FileChannel channel =
                         FileChannel.open(
-                                tempPath,
+                                candidate,
                                 StandardOpenOption.CREATE,
                                 StandardOpenOption.WRITE,
                                 StandardOpenOption.TRUNCATE_EXISTING
                         )
         ) {
-            while (buffer.hasRemaining()) {
+            while (data.hasRemaining()) {
                 channel.write(
-                        buffer
+                        data
                 );
             }
-
-            /*
-             * Durability boundary for the candidate snapshot.
-             */
-            channel.force(true);
         }
     }
 
-    private void replaceSnapshotAtomically()
-            throws IOException {
+    /*
+     * Production durability boundary for candidate.
+     */
+    static void forceCandidate(
+            Path candidate
+    ) throws IOException {
 
+        try (
+                FileChannel channel =
+                        FileChannel.open(
+                                candidate,
+                                StandardOpenOption.WRITE
+                        )
+        ) {
+            channel.force(
+                    true
+            );
+        }
+    }
+
+    /*
+     * Production publication step.
+     *
+     * IMPORTANT:
+     *
+     * We intentionally do NOT fall back to a normal
+     * non-atomic move.
+     *
+     * If the filesystem does not support atomic
+     * replacement, snapshot save fails and the old
+     * snapshot remains authoritative.
+     */
+    static void promoteCandidate(
+            Path candidate,
+            Path destination
+    ) throws IOException {
+
+        Files.move(
+                candidate,
+                destination,
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING
+        );
+    }
+
+    private void deleteCandidateBestEffort() {
         try {
-            Files.move(
-                    tempPath,
-                    snapshotPath,
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING
+            Files.deleteIfExists(
+                    tempPath
             );
 
-        } catch (AtomicMoveNotSupportedException e) {
-
+        } catch (IOException ignored) {
             /*
-             * Fallback.
+             * Correctness does not depend on this cleanup.
              *
-             * Note:
-             * this loses the strong atomic-replacement guarantee,
-             * so this limitation should be documented.
+             * loadLatest() ignores tempPath.
+             *
+             * Preserve the original failure.
              */
-            Files.move(
-                    tempPath,
-                    snapshotPath,
-                    StandardCopyOption.REPLACE_EXISTING
-            );
         }
     }
 
@@ -430,14 +563,19 @@ public final class FileQueueSnapshotStore
         StringBuilder builder =
                 new StringBuilder();
 
-        /*
-         * Snapshot metadata.
-         */
         builder.append("POSITION")
                 .append(SEPARATOR)
-                .append(snapshot.walPosition().segmentId())
+                .append(
+                        snapshot
+                                .walPosition()
+                                .segmentId()
+                )
                 .append(SEPARATOR)
-                .append(snapshot.walPosition().offset())
+                .append(
+                        snapshot
+                                .walPosition()
+                                .offset()
+                )
                 .append('\n');
 
         for (ReadySnapshotEntry entry
@@ -445,11 +583,21 @@ public final class FileQueueSnapshotStore
 
             builder.append("READY")
                     .append(SEPARATOR)
-                    .append(encode(entry.messageId()))
+                    .append(
+                            encode(
+                                    entry.messageId()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(encode(entry.payload()))
+                    .append(
+                            encode(
+                                    entry.payload()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(entry.nextAttempt())
+                    .append(
+                            entry.nextAttempt()
+                    )
                     .append('\n');
         }
 
@@ -458,15 +606,32 @@ public final class FileQueueSnapshotStore
 
             builder.append("IN_FLIGHT")
                     .append(SEPARATOR)
-                    .append(encode(entry.messageId()))
+                    .append(
+                            encode(
+                                    entry.messageId()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(encode(entry.payload()))
+                    .append(
+                            encode(
+                                    entry.payload()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(encode(entry.receiptHandle()))
+                    .append(
+                            encode(
+                                    entry.receiptHandle()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(entry.attempt())
+                    .append(
+                            entry.attempt()
+                    )
                     .append(SEPARATOR)
-                    .append(entry.leaseUntil().toEpochMilli())
+                    .append(
+                            entry.leaseUntil()
+                                    .toEpochMilli()
+                    )
                     .append('\n');
         }
 
@@ -475,13 +640,26 @@ public final class FileQueueSnapshotStore
 
             builder.append("DELAYED")
                     .append(SEPARATOR)
-                    .append(encode(entry.messageId()))
+                    .append(
+                            encode(
+                                    entry.messageId()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(encode(entry.payload()))
+                    .append(
+                            encode(
+                                    entry.payload()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(entry.nextAttempt())
+                    .append(
+                            entry.nextAttempt()
+                    )
                     .append(SEPARATOR)
-                    .append(entry.retryAt().toEpochMilli())
+                    .append(
+                            entry.retryAt()
+                                    .toEpochMilli()
+                    )
                     .append('\n');
         }
 
@@ -490,9 +668,17 @@ public final class FileQueueSnapshotStore
 
             builder.append("DEAD_LETTER")
                     .append(SEPARATOR)
-                    .append(encode(entry.messageId()))
+                    .append(
+                            encode(
+                                    entry.messageId()
+                            )
+                    )
                     .append(SEPARATOR)
-                    .append(encode(entry.payload()))
+                    .append(
+                            encode(
+                                    entry.payload()
+                            )
+                    )
                     .append('\n');
         }
 
@@ -544,6 +730,16 @@ public final class FileQueueSnapshotStore
                             "POSITION"
                     );
 
+                    /*
+                     * A snapshot must contain exactly one
+                     * authoritative WAL position.
+                     */
+                    if (position != null) {
+                        throw new SnapshotException(
+                                "Snapshot contains multiple WAL positions"
+                        );
+                    }
+
                     position =
                             new WalPosition(
                                     Long.parseLong(
@@ -565,8 +761,12 @@ public final class FileQueueSnapshotStore
 
                     ready.add(
                             new ReadySnapshotEntry(
-                                    decode(parts[1]),
-                                    decode(parts[2]),
+                                    decode(
+                                            parts[1]
+                                    ),
+                                    decode(
+                                            parts[2]
+                                    ),
                                     Integer.parseInt(
                                             parts[3]
                                     )
@@ -584,9 +784,15 @@ public final class FileQueueSnapshotStore
 
                     inFlight.add(
                             new InFlightSnapshotEntry(
-                                    decode(parts[1]),
-                                    decode(parts[2]),
-                                    decode(parts[3]),
+                                    decode(
+                                            parts[1]
+                                    ),
+                                    decode(
+                                            parts[2]
+                                    ),
+                                    decode(
+                                            parts[3]
+                                    ),
                                     Integer.parseInt(
                                             parts[4]
                                     ),
@@ -609,8 +815,12 @@ public final class FileQueueSnapshotStore
 
                     delayed.add(
                             new DelayedSnapshotEntry(
-                                    decode(parts[1]),
-                                    decode(parts[2]),
+                                    decode(
+                                            parts[1]
+                                    ),
+                                    decode(
+                                            parts[2]
+                                    ),
                                     Integer.parseInt(
                                             parts[3]
                                     ),
@@ -633,8 +843,12 @@ public final class FileQueueSnapshotStore
 
                     deadLetters.add(
                             new DeadLetterSnapshotEntry(
-                                    decode(parts[1]),
-                                    decode(parts[2])
+                                    decode(
+                                            parts[1]
+                                    ),
+                                    decode(
+                                            parts[2]
+                                    )
                             )
                     );
                 }
@@ -702,7 +916,9 @@ public final class FileQueueSnapshotStore
         try {
             return new String(
                     Base64.getUrlDecoder()
-                            .decode(encoded),
+                            .decode(
+                                    encoded
+                            ),
                     StandardCharsets.UTF_8
             );
 
@@ -712,5 +928,35 @@ public final class FileQueueSnapshotStore
                     e
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Failure-injection abstractions
+    // ---------------------------------------------------------------------
+
+    @FunctionalInterface
+    interface CandidateWriter {
+
+        void write(
+                Path candidate,
+                ByteBuffer data
+        ) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface CandidateForcer {
+
+        void force(
+                Path candidate
+        ) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface SnapshotPromoter {
+
+        void promote(
+                Path candidate,
+                Path destination
+        ) throws IOException;
     }
 }
