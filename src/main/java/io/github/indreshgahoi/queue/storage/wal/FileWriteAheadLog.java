@@ -5,81 +5,34 @@ import io.github.indreshgahoi.queue.storage.WalPosition;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
-import java.util.zip.CRC32C;
 
 public final class FileWriteAheadLog
         implements WriteAheadLog {
 
-    /**
-     * WAL Header
-     * +-------------+-------------+
-     * | Magic       | Version     |
-     * | 4 bytes     | 4 bytes     |
-     * +-------------+-------------+
-     */
+    private static final int WAL_MAGIC =
+            0x4451574C; // "DQWL"
 
-    private static final int WAL_MAGIC = 0x4451574C; // "DQWL"
     private static final int WAL_VERSION = 1;
-    /*
-     * Physical WAL frame:
-     *
-     * +----------------------+----------------------+-----------------
-     * | payload length       | serialized record    |  Checksum      |
-     * | 4 bytes              | N bytes              |  4 bytes       |
-     * +----------------------+----------------------+-----------------
-     */
-    private static final int LENGTH_PREFIX_BYTES =
-            Integer.BYTES;
-    private static final int CHECKSUM_BYTES =
-            Integer.BYTES;
+
     private static final int WAL_HEADER_SIZE =
             Integer.BYTES + Integer.BYTES;
 
-    /*
-     * Defensive upper bound.
-     *
-     * WAL bytes come from persistent storage and must
-     * not be blindly trusted during recovery.
-     */
-    private static final int MAX_RECORD_SIZE =
-            16 * 1024 * 1024;
-
-    private static final String WRITE_SEPARATOR = "|";
-    private static final String READ_SEPARATOR = "\\|";
-
     private final Path path;
-
-    /*
-     * Used only for append operations.
-     */
+    private final WalFrameCodec frameCodec;
     private final FileChannel appendChannel;
-
-    /*
-     * Small injection seam used by tests to simulate:
-     *
-     * partial physical write
-     *      +
-     * IOException
-     */
     private final FrameAppender frameAppender;
 
     /*
-     * If append fails, we cannot know how much of the
-     * current frame reached the file.
-     *
-     * Therefore this WAL instance must reject all
-     * subsequent appends.
+     * If append fails, the current frame may have been
+     * partially persisted. Reject subsequent appends until
+     * a new instance performs recovery.
      */
     private boolean failed;
-
     private boolean closed;
 
     public FileWriteAheadLog(Path path) {
@@ -109,6 +62,8 @@ public final class FileWriteAheadLog
                         "frameAppender"
                 );
 
+        this.frameCodec = new WalFrameCodec();
+
         try {
             this.appendChannel =
                     FileChannel.open(
@@ -117,6 +72,7 @@ public final class FileWriteAheadLog
                             StandardOpenOption.WRITE,
                             StandardOpenOption.APPEND
                     );
+
             initializeOrValidateHeader();
 
         } catch (IOException e) {
@@ -127,134 +83,14 @@ public final class FileWriteAheadLog
         }
     }
 
-    private void initializeOrValidateHeader() {
-        try {
-            long size =
-                    appendChannel.size();
-
-            if (size == 0) {
-                writeHeader();
-                return;
-            }
-
-            validateHeader();
-
-        } catch (IOException e) {
-            throw new WalException(
-                    "Failed to initialize WAL header: " + path,
-                    e
-            );
-        }
-    }
-
-    private void validateHeader() throws IOException {
-        try (FileChannel channel =
-                     FileChannel.open(
-                             path,
-                             StandardOpenOption.READ
-                     )) {
-
-            ByteBuffer header =
-                    ByteBuffer.allocate(WAL_HEADER_SIZE);
-
-            ReadResult result =
-                    readFully(channel, header);
-
-            if (!result.complete()) {
-                throw new WalException(
-                        "Incomplete WAL header"
-                );
-            }
-
-            header.flip();
-
-            int magic =
-                    header.getInt();
-
-            int version =
-                    header.getInt();
-
-            if (magic != WAL_MAGIC) {
-                throw new WalException(
-                        "Invalid WAL magic"
-                );
-            }
-
-            if (version != WAL_VERSION) {
-                throw new WalException(
-                        "Unsupported WAL version: "
-                                + version
-                );
-            }
-        }
-    }
-
-    private void writeHeader()
-            throws IOException {
-
-        ByteBuffer header =
-                ByteBuffer.allocate(
-                        WAL_HEADER_SIZE
-                );
-
-        header.putInt(WAL_MAGIC);
-        header.putInt(WAL_VERSION);
-        header.flip();
-
-        while (header.hasRemaining()) {
-            appendChannel.write(header);
-        }
-
-        appendChannel.force(true);
-    }
-
     @Override
     public synchronized void append(
             WalRecord record
     ) {
         ensureAppendable();
 
-        Objects.requireNonNull(
-                record,
-                "record"
-        );
-
-        byte[] payload =
-                serialize(record)
-                        .getBytes(StandardCharsets.UTF_8);
-
-        validateRecordSize(payload.length);
-
-        CRC32C crc32c = new CRC32C();
-
-        crc32c.update(
-                payload,
-                0,
-                payload.length);
-
-        int checksum = (int) crc32c.getValue();
-
-        /*
-         * Build:
-         *
-         * [4-byte payload length][payload bytes]
-         */
         ByteBuffer frame =
-                ByteBuffer.allocate(
-                        LENGTH_PREFIX_BYTES
-                                + payload.length
-                                + CHECKSUM_BYTES
-                );
-
-        frame.putInt(payload.length);
-        frame.put(payload);
-        frame.putInt(checksum);
-
-        /*
-         * Switch from writing into the ByteBuffer
-         * to reading from it into FileChannel.
-         */
-        frame.flip();
+                frameCodec.encode(record);
 
         try {
             frameAppender.append(
@@ -263,13 +99,6 @@ public final class FileWriteAheadLog
             );
 
         } catch (IOException e) {
-
-            /*
-             * A partial frame may already exist.
-             *
-             * Do not allow another valid frame to be
-             * appended behind it.
-             */
             failed = true;
 
             throw new WalException(
@@ -283,18 +112,9 @@ public final class FileWriteAheadLog
     public synchronized List<WalRecord> readAll() {
         ensureOpen();
 
-        try (
-                FileChannel recoveryChannel =
-                        FileChannel.open(
-                                path,
-                                StandardOpenOption.READ,
-                                StandardOpenOption.WRITE
-                        )
-        ) {
-            /*
-             * Header has already been validated when
-             * FileWriteAheadLog was opened.
-             */
+        try (FileChannel recoveryChannel =
+                     openRecoveryChannel()) {
+
             recoveryChannel.position(
                     WAL_HEADER_SIZE
             );
@@ -305,141 +125,8 @@ public final class FileWriteAheadLog
 
         } catch (IOException e) {
             throw new WalException(
-                    "Failed to recover WAL: "
-                            + path,
+                    "Failed to recover WAL: " + path,
                     e
-            );
-        }
-    }
-
-    /*
-     * Production frame append.
-     */
-    private static void writeAndForceFrame(
-            FileChannel channel,
-            ByteBuffer frame
-    ) throws IOException {
-
-        /*
-         * FileChannel.write() may perform a partial
-         * write, so continue until the entire frame
-         * has been consumed.
-         */
-        while (frame.hasRemaining()) {
-            channel.write(frame);
-        }
-
-        /*
-         * Current durability policy:
-         *
-         * every WAL record is forced before append()
-         * reports success.
-         */
-        channel.force(true);
-    }
-
-    /*
-     * Read until:
-     *
-     * - the requested buffer is full, or
-     * - EOF is encountered.
-     */
-    private static ReadResult readFully(
-            FileChannel channel,
-            ByteBuffer buffer
-    ) throws IOException {
-
-        int totalRead = 0;
-
-        while (buffer.hasRemaining()) {
-
-            int read =
-                    channel.read(buffer);
-
-            if (read == -1) {
-                break;
-            }
-
-            totalRead += read;
-        }
-
-        return new ReadResult(
-                totalRead,
-                !buffer.hasRemaining()
-        );
-    }
-
-    /*
-     * Repair an incomplete final frame.
-     *
-     * lastValidPosition is the beginning of the
-     * incomplete frame.
-     */
-    private static void truncateTail(
-            FileChannel channel,
-            long lastValidPosition
-    ) throws IOException {
-
-        channel.truncate(
-                lastValidPosition
-        );
-
-        /*
-         * Recovery modified the durable WAL,
-         * therefore persist the repair.
-         */
-        channel.force(true);
-    }
-
-    private void validateRecordSize(
-            int recordSize
-    ) {
-        if (recordSize <= 0) {
-            throw new WalException(
-                    "WAL record payload must not be empty"
-            );
-        }
-
-        if (recordSize > MAX_RECORD_SIZE) {
-            throw new WalException(
-                    "WAL record exceeds maximum size: "
-                            + recordSize
-            );
-        }
-    }
-
-    private void validateFrameLength(
-            int payloadLength
-    ) {
-        if (payloadLength <= 0) {
-            throw new WalException(
-                    "Invalid WAL frame length: "
-                            + payloadLength
-            );
-        }
-
-        if (payloadLength > MAX_RECORD_SIZE) {
-            throw new WalException(
-                    "WAL frame exceeds maximum size: "
-                            + payloadLength
-            );
-        }
-    }
-
-    private void ensureOpen() {
-        if (closed) {
-            throw new WalException(
-                    "WAL is already closed"
-            );
-        }
-    }
-
-    private void ensureAppendable() {
-        ensureOpen();
-
-        if (failed) {
-            throw new WalException(
-                    "WAL is in failed state; close and reopen it to recover"
             );
         }
     }
@@ -453,6 +140,7 @@ public final class FileWriteAheadLog
                     0,
                     appendChannel.size()
             );
+
         } catch (IOException e) {
             throw new WalException(
                     "Failed to read current WAL position",
@@ -472,9 +160,6 @@ public final class FileWriteAheadLog
                 "position"
         );
 
-        /*
-         * Current implementation has exactly one WAL segment.
-         */
         if (position.segmentId() != 0) {
             throw new WalException(
                     "Unsupported WAL segment: "
@@ -482,26 +167,15 @@ public final class FileWriteAheadLog
             );
         }
 
-        try (
-                FileChannel recoveryChannel =
-                        FileChannel.open(
-                                path,
-                                StandardOpenOption.READ,
-                                StandardOpenOption.WRITE
-                        )
-        ) {
-            long walEnd =
-                    recoveryChannel.size();
+        try (FileChannel recoveryChannel =
+                     openRecoveryChannel()) {
 
             validateReplayPosition(
                     recoveryChannel,
                     position.offset(),
-                    walEnd
+                    recoveryChannel.size()
             );
 
-            /*
-             * Offset is now known to be a valid frame boundary.
-             */
             recoveryChannel.position(
                     position.offset()
             );
@@ -532,153 +206,124 @@ public final class FileWriteAheadLog
 
         } catch (IOException e) {
             throw new WalException(
-                    "Failed to close WAL: "
-                            + path,
+                    "Failed to close WAL: " + path,
                     e
             );
         }
     }
 
-    private List<WalRecord> readRecordsFrom(
-            FileChannel recoveryChannel
-    ) throws IOException {
+    private void initializeOrValidateHeader() {
+        try {
+            if (appendChannel.size() == 0) {
+                writeHeader();
+                return;
+            }
 
+            validateHeader();
+
+        } catch (IOException e) {
+            throw new WalException(
+                    "Failed to initialize WAL header: " + path,
+                    e
+            );
+        }
+    }
+
+    private void writeHeader() throws IOException {
+        ByteBuffer header =
+                ByteBuffer.allocate(
+                        WAL_HEADER_SIZE
+                );
+
+        header.putInt(WAL_MAGIC);
+        header.putInt(WAL_VERSION);
+        header.flip();
+
+        writeFully(
+                appendChannel,
+                header
+        );
+
+        appendChannel.force(true);
+    }
+
+    private void validateHeader() throws IOException {
+        try (FileChannel channel =
+                     FileChannel.open(
+                             path,
+                             StandardOpenOption.READ
+                     )) {
+
+            ByteBuffer header =
+                    ByteBuffer.allocate(
+                            WAL_HEADER_SIZE
+                    );
+
+            if (!readFully(channel, header)) {
+                throw new WalException(
+                        "Incomplete WAL header"
+                );
+            }
+
+            header.flip();
+
+            int magic = header.getInt();
+            int version = header.getInt();
+
+            if (magic != WAL_MAGIC) {
+                throw new WalException(
+                        "Invalid WAL magic"
+                );
+            }
+
+            if (version != WAL_VERSION) {
+                throw new WalException(
+                        "Unsupported WAL version: "
+                                + version
+                );
+            }
+        }
+    }
+
+    private FileChannel openRecoveryChannel()
+            throws IOException {
+        return FileChannel.open(
+                path,
+                StandardOpenOption.READ,
+                StandardOpenOption.WRITE
+        );
+    }
+
+    private List<WalRecord> readRecordsFrom(
+            FileChannel channel
+    ) throws IOException {
         List<WalRecord> records =
                 new ArrayList<>();
 
         while (true) {
+            DecodedFrame frame =
+                    frameCodec.readNext(channel);
 
-            long frameStart =
-                    recoveryChannel.position();
+            switch (frame.status()) {
+                case COMPLETE ->
+                        records.add(frame.record());
 
-            ByteBuffer lengthBuffer =
-                    ByteBuffer.allocate(
-                            LENGTH_PREFIX_BYTES
+                case CLEAN_EOF -> {
+                    return List.copyOf(records);
+                }
+
+                case TORN_LENGTH,
+                     TORN_PAYLOAD,
+                     TORN_CHECKSUM -> {
+                    truncateTail(
+                            channel,
+                            frame.frameStart()
                     );
 
-            ReadResult lengthResult =
-                    readFully(
-                            recoveryChannel,
-                            lengthBuffer
-                    );
-
-            /*
-             * Clean EOF.
-             */
-            if (lengthResult.bytesRead() == 0) {
-                break;
+                    return List.copyOf(records);
+                }
             }
-
-            /*
-             * Torn length prefix.
-             */
-            if (!lengthResult.complete()) {
-                truncateTail(
-                        recoveryChannel,
-                        frameStart
-                );
-
-                break;
-            }
-
-            lengthBuffer.flip();
-
-            int payloadLength =
-                    lengthBuffer.getInt();
-
-            validateFrameLength(
-                    payloadLength
-            );
-
-            ByteBuffer payloadBuffer =
-                    ByteBuffer.allocate(
-                            payloadLength
-                    );
-
-            ReadResult payloadResult =
-                    readFully(
-                            recoveryChannel,
-                            payloadBuffer
-                    );
-
-            /*
-             * Torn payload.
-             */
-            if (!payloadResult.complete()) {
-                truncateTail(
-                        recoveryChannel,
-                        frameStart
-                );
-
-                break;
-            }
-
-            ByteBuffer checksumBuffer =
-                    ByteBuffer.allocate(
-                            CHECKSUM_BYTES
-                    );
-
-            ReadResult checksumResult =
-                    readFully(
-                            recoveryChannel,
-                            checksumBuffer
-                    );
-
-            /*
-             * Torn checksum.
-             */
-            if (!checksumResult.complete()) {
-                truncateTail(
-                        recoveryChannel,
-                        frameStart
-                );
-
-                break;
-            }
-
-            checksumBuffer.flip();
-
-            int storedChecksum =
-                    checksumBuffer.getInt();
-
-            CRC32C crc32c =
-                    new CRC32C();
-
-            crc32c.update(
-                    payloadBuffer.array(),
-                    0,
-                    payloadLength
-            );
-
-            int calculatedChecksum =
-                    (int) crc32c.getValue();
-
-            /*
-             * Complete frame with invalid CRC is corruption,
-             * NOT torn-tail recovery.
-             */
-            if (calculatedChecksum
-                    != storedChecksum) {
-
-                throw new WalException(
-                        "WAL checksum mismatch at frame offset "
-                                + frameStart
-                );
-            }
-
-            payloadBuffer.flip();
-
-            String serialized =
-                    StandardCharsets.UTF_8
-                            .decode(payloadBuffer)
-                            .toString();
-
-            records.add(
-                    deserialize(serialized)
-            );
         }
-
-        return List.copyOf(records);
     }
 
     private void validateReplayPosition(
@@ -686,10 +331,6 @@ public final class FileWriteAheadLog
             long requestedOffset,
             long walEnd
     ) throws IOException {
-
-        /*
-         * Records cannot start inside the WAL header.
-         */
         if (requestedOffset < WAL_HEADER_SIZE) {
             throw new WalException(
                     "WAL offset is before record area: "
@@ -697,11 +338,6 @@ public final class FileWriteAheadLog
             );
         }
 
-        /*
-         * End of WAL itself is a valid replay position.
-         *
-         * readFrom(end) => empty result.
-         */
         if (requestedOffset > walEnd) {
             throw new WalException(
                     "WAL offset is beyond end of file: "
@@ -716,93 +352,32 @@ public final class FileWriteAheadLog
             return;
         }
 
-        /*
-         * Start scanning from the first frame.
-         *
-         * We do NOT interpret requestedOffset directly.
-         * Instead we discover every legitimate frame boundary.
-         */
-        channel.position(
-                WAL_HEADER_SIZE
-        );
+        channel.position(WAL_HEADER_SIZE);
 
         while (channel.position() < walEnd) {
-
-            long frameStart =
-                    channel.position();
+            long frameStart = channel.position();
 
             if (frameStart == requestedOffset) {
                 return;
             }
 
-            ByteBuffer lengthBuffer =
-                    ByteBuffer.allocate(
-                            LENGTH_PREFIX_BYTES
-                    );
+            DecodedFrame frame =
+                    frameCodec.readNext(channel);
 
-            ReadResult lengthResult =
-                    readFully(
-                            channel,
-                            lengthBuffer
-                    );
-
-            /*
-             * While validating a replay position, an incomplete
-             * frame means the only valid boundary is frameStart.
-             *
-             * requestedOffset inside that frame cannot be valid.
-             */
-            if (!lengthResult.complete()) {
+            if (frame.status()
+                    != FrameReadStatus.COMPLETE) {
                 break;
             }
 
-            lengthBuffer.flip();
+            long frameEnd = channel.position();
 
-            int payloadLength =
-                    lengthBuffer.getInt();
-
-            validateFrameLength(
-                    payloadLength
-            );
-
-            /*
-             * Complete frame size:
-             *
-             * length prefix
-             * +
-             * payload
-             * +
-             * checksum
-             */
-            long frameEnd =
-                    frameStart
-                            + LENGTH_PREFIX_BYTES
-                            + payloadLength
-                            + CHECKSUM_BYTES;
-
-            if (frameEnd > walEnd) {
-                /*
-                 * Torn final frame.
-                 */
-                break;
-            }
-
-            /*
-             * If requestedOffset falls anywhere between
-             * frameStart and frameEnd, it is inside a frame.
-             */
             if (requestedOffset > frameStart
                     && requestedOffset < frameEnd) {
-
                 throw new WalException(
                         "WAL offset does not point to a frame boundary: "
                                 + requestedOffset
                 );
             }
-
-            channel.position(
-                    frameEnd
-            );
 
             if (frameEnd == requestedOffset) {
                 return;
@@ -815,147 +390,72 @@ public final class FileWriteAheadLog
         );
     }
 
-    /*
-     * Logical WAL-record serialization.
-     *
-     * This is independent from physical framing.
-     *
-     * Physical format:
-     *
-     * [length][serialized record]
-     */
-    private String serialize(
-            WalRecord record
-    ) {
-        return record.type().name()
-                + WRITE_SEPARATOR
-                + encode(record.messageId())
-                + WRITE_SEPARATOR
-                + encode(record.payload())
-                + WRITE_SEPARATOR
-                + encode(record.receiptHandle())
-                + WRITE_SEPARATOR
-                + record.attempt()
-                + WRITE_SEPARATOR
-                + record.timestamp().toEpochMilli();
-    }
-
-    private WalRecord deserialize(
-            String serialized
-    ) {
-        String[] parts =
-                serialized.split(
-                        READ_SEPARATOR,
-                        -1
-                );
-
-        if (parts.length != 6) {
-            throw new WalException(
-                    "Invalid WAL record: expected 6 fields but found "
-                            + parts.length
-            );
-        }
-
-        try {
-            WalRecordType type =
-                    WalRecordType.valueOf(
-                            parts[0]
-                    );
-
-            String messageId =
-                    decode(parts[1]);
-
-            String payload =
-                    decode(parts[2]);
-
-            String receiptHandle =
-                    decode(parts[3]);
-
-            int attempt =
-                    Integer.parseInt(
-                            parts[4]
-                    );
-
-            Instant timestamp =
-                    Instant.ofEpochMilli(
-                            Long.parseLong(
-                                    parts[5]
-                            )
-                    );
-
-            return new WalRecord(
-                    type,
-                    messageId,
-                    payload,
-                    receiptHandle,
-                    attempt,
-                    timestamp
-            );
-
-        } catch (RuntimeException e) {
-            throw new WalException(
-                    "Unable to deserialize WAL record",
-                    e
-            );
-        }
-    }
-
-    /*
-     * Base64 protects our delimiter-based logical
-     * record representation.
-     *
-     * It is encoding, not encryption.
-     */
-    private String encode(
-            String value
-    ) {
-        if (value == null) {
-            return "";
-        }
-
-        return Base64.getUrlEncoder()
-                .withoutPadding()
-                .encodeToString(
-                        value.getBytes(
-                                StandardCharsets.UTF_8
-                        )
-                );
-    }
-
-    private String decode(
-            String encoded
-    ) {
-        if (encoded.isEmpty()) {
-            return null;
-        }
-
-        return new String(
-                Base64.getUrlDecoder()
-                        .decode(encoded),
-                StandardCharsets.UTF_8
+    private static void writeAndForceFrame(
+            FileChannel channel,
+            ByteBuffer frame
+    ) throws IOException {
+        writeFully(
+                channel,
+                frame
         );
+
+        channel.force(true);
+    }
+
+    private static void writeFully(
+            FileChannel channel,
+            ByteBuffer buffer
+    ) throws IOException {
+        while (buffer.hasRemaining()) {
+            channel.write(buffer);
+        }
+    }
+
+    private static boolean readFully(
+            FileChannel channel,
+            ByteBuffer buffer
+    ) throws IOException {
+        while (buffer.hasRemaining()) {
+            if (channel.read(buffer) == -1) {
+                break;
+            }
+        }
+
+        return !buffer.hasRemaining();
+    }
+
+    private static void truncateTail(
+            FileChannel channel,
+            long lastValidPosition
+    ) throws IOException {
+        channel.truncate(
+                lastValidPosition
+        );
+
+        channel.force(true);
+    }
+
+    private void ensureOpen() {
+        if (closed) {
+            throw new WalException(
+                    "WAL is already closed"
+            );
+        }
+    }
+
+    private void ensureAppendable() {
+        ensureOpen();
+
+        if (failed) {
+            throw new WalException(
+                    "WAL is in failed state; close and reopen it to recover"
+            );
+        }
     }
 
     /*
-     * Represents the outcome of attempting to fill
-     * a ByteBuffer.
-     */
-    record ReadResult(
-            int bytesRead,
-            boolean complete
-    ) {
-    }
-
-    /*
-     * Failure-injection boundary.
-     *
-     * Production:
-     *
-     * write entire frame + force
-     *
-     * Tests:
-     *
-     * write part of frame + throw IOException
+     * Failure-injection boundary. Production writes and forces the
+     * complete frame; tests can write a partial frame and throw.
      */
     @FunctionalInterface
     interface FrameAppender {

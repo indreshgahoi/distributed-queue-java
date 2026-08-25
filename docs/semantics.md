@@ -1698,3 +1698,230 @@ snapshot, that history must be retained.
 
 Compaction must fail safe toward retaining data.
 
+## Version 0.12.5
+```text
+Current
+-------
+queue.wal
+   ↓
+grows continuously
+
+
+v0.12.5
+-------
+wal/
+├── segment-000000.wal   SEALED
+├── segment-000001.wal   SEALED
+├── segment-000002.wal   SEALED
+└── segment-000003.wal   ACTIVE
+                              ↑
+                         new writes
+```
+Segmentation becomes necessary a single WAL file eventually creates three problems at once:
+1. WAL grows without bound.
+2. old history is awkward to reclaim
+3. operation actions like compaction becomes risky because they modify the same file that is still receiving writes.
+
+Solution: Segmentation  
+It changes the storage shape:
+```text
+wal/
+├── segment-000001.wal   SEALED
+├── segment-000002.wal   SEALED
+├── segment-000003.wal   SEALED
+└── segment-000004.wal   ACTIVE
+```
+Only active segments receive writes. Once it reaches a configured limit, say 64 MB, it sealed and never modified again.
+```text
+segment 4 ACTIVE
+      ↓ reaches threshold
+segment 4 SEALED
+      ↓
+create segment 5
+      ↓
+segment 5 ACTIVE
+```
+That give us powerful invariant:
+> Sealed segments are immutable durable history; only the active segment changes.  
+
+Now compaction becomes mush simpler, Suppose the authoritative snapshot position is:
+```text
+WalPosition(
+    segmentId = 4,
+    offset = 12_480
+)
+```
+Then:
+```text
+segment 1  → entirely older than snapshot → deletable
+segment 2  → entirely older than snapshot → deletable
+segment 3  → entirely older than snapshot → deletable
+segment 4  → snapshot lies inside it       → KEEP
+segment 5  → newer history                 → KEEP
+```
+We don't have to rewrite the segment 4 just to reclaim some space. Delete whole immutable segments first. 
+That is deliberately conservative, but mush safer.
+
+There is another operational benefit: a corrupt or torn write can normally affect only the active tail segment. 
+Sealed segments should already have been validated and are immutable.
+```text
+segment 1 SEALED ✓
+segment 2 SEALED ✓
+segment 3 SEALED ✓
+segment 4 ACTIVE
+                 ↑
+              crash here
+```
+That gives us a useful failure boundary.
+
+The next important concept is **rotation**. Imagine segment 4 is almost full:
+```text
+segment 4:
+[frame][frame][frame] ... 63.99 MB
+```
+A new WAL record arrives that would cross the configured limit. We need to perform:
+```text
+finish current segment
+        ↓
+seal segment 4
+        ↓
+create/initialize segment 5
+        ↓
+make segment 5 active
+        ↓
+append new record there
+```
+> Should rotation happen before appending a record that would exceed the limit, or allow the final record to exceed the nominal segment size and rotate afterward?
+I recommend later
+segment target = 64 MB
+
+current size = 63.9 MB
+next frame   = 500 KB
+
+append entire frame to segment 4
+→ segment becomes ~64.4 MB
+
+then rotate before the NEXT append
+
+That gives another invariant:
+> A WAL record belongs entirely to exactly one segment.  
+
+The resulting write path becomes: 
+```text
+append(record)
+    ↓
+is active segment already >= target?
+    ↓ yes
+rotate
+    ↓
+serialize record
+    ↓
+[length][payload][CRC]
+    ↓
+append entire frame
+    ↓
+force
+    ↓
+return WalPosition
+```
+Invariants:
+1. Exactly one segment is active for append.
+2. Sealed segments are never modified.
+3. Segment IDs increase monotonically.
+4. A frame is never split across segments.
+5. Recovery replays segments in segmentId order.
+6. Only the final active segment may contain a recoverable torn tail.
+7. WalPosition always identifies a boundary inside a specific segment.
+8. Rotation must preserve a complete recovery path across crashes.
+## v0.12.5 — Segmented WAL
+
+### G124 — Exactly one WAL segment is active
+
+The highest valid segment ID is the active segment.
+
+All lower segment IDs are sealed and immutable.
+
+### G125 — Sealed segments are immutable
+
+Once a newer segment becomes authoritative, previous segments must never
+receive additional WAL records.
+
+### G126 — Segment IDs increase monotonically
+
+If segment N is active, the next segment created by rotation is N + 1.
+
+Segment IDs are never reused during normal operation.
+
+### G127 — WAL frames never span segments
+
+A complete WAL frame:
+
+    [length][payload][checksum]
+
+must exist entirely within exactly one segment.
+
+A record must never begin in one segment and finish in another.
+
+### G128 — Segment size is a rotation threshold, not a hard record boundary
+
+A frame may cause the current segment to exceed the configured target size.
+
+Rotation occurs before the next append.
+
+This avoids splitting records across segments.
+
+### G129 — Temporary segments are not authoritative
+
+Files such as:
+
+    segment-000004.tmp
+
+must never participate in normal WAL recovery.
+
+Only successfully promoted `.wal` files are authoritative.
+
+### G130 — A new segment becomes active through one publication event
+
+Rotation creates and initializes a temporary candidate:
+
+    segment-(N+1).tmp
+
+After it is complete and durable, it is atomically promoted to:
+
+    segment-(N+1).wal
+
+The existence of the new valid `.wal` file makes it active by definition.
+
+No separate ACTIVE/SEALED metadata is required.
+
+### G131 — Recovery replays segments in ascending segment ID order
+
+Recovery order:
+
+    segment 0
+    segment 1
+    segment 2
+    ...
+
+Record order within each segment is preserved.
+
+### G132 — Only the highest authoritative segment may contain a recoverable torn tail
+
+A torn tail in the active segment may be recovered using the existing
+truncation policy.
+
+A malformed/torn sealed segment is corruption and must not be silently repaired.
+
+### G133 — WalPosition identifies a position inside one specific segment
+
+    WalPosition(segmentId, offset)
+
+is meaningful only within the identified segment.
+
+### G134 — Empty active segment is valid
+
+A newly promoted segment containing only its WAL header is valid and may
+become the active segment before any records are appended.
+
+
+

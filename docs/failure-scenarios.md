@@ -795,3 +795,150 @@ The active WAL segment is never eligible for deletion.
 
 Only immutable, fully closed segments strictly older than the snapshot's
 segment boundary may eventually be reclaimed.
+
+## F29 — Crash While Creating New Segment Candidate
+
+Existing:
+
+    segment-3.wal
+
+Rotation begins:
+
+    segment-4.tmp
+
+Process crashes before candidate initialization completes.
+
+Required recovery:
+
+    ignore segment-4.tmp
+    active segment remains segment-3.wal
+
+## F30 — Fully Written Temp Segment Exists After Crash
+
+State:
+
+    segment-3.wal
+    segment-4.tmp   <- complete and durable
+
+Crash occurs before atomic promotion.
+
+Required recovery:
+
+    segment-4.tmp is not authoritative
+    active segment remains segment-3.wal
+
+The presence of a valid temporary file must not change recovery state.
+
+## F30 — Fully Written Temp Segment Exists After Crash
+
+State:
+
+    segment-3.wal
+    segment-4.tmp   <- complete and durable
+
+Crash occurs before atomic promotion.
+
+Required recovery:
+
+    segment-4.tmp is not authoritative
+    active segment remains segment-3.wal
+
+The presence of a valid temporary file must not change recovery state.
+
+## F31 — Crash Immediately After Segment Promotion
+
+State:
+
+    segment-3.wal
+    segment-4.wal
+
+Crash occurs before any record is appended to segment 4.
+
+Required recovery:
+
+    segment 4 is active
+    segment 3 is sealed
+    an empty/header-only active segment is valid
+
+## F32 — Append Accidentally Continues to Sealed Segment
+
+State:
+
+    segment-3.wal
+    segment-4.wal
+
+If implementation later appends another record to segment 3, durable history
+can become physically reordered.
+
+Required behavior:
+
+    only the highest authoritative segment may accept appends
+
+## F33 — WAL Frame Split Across Two Segments
+
+Incorrect implementation:
+
+    segment-3:
+        [length][partial payload]
+
+    segment-4:
+        [remaining payload][checksum]
+
+Required behavior:
+
+    reject this design entirely.
+
+A WAL frame must be atomic with respect to segment membership.
+
+## F34 — Gap in Segment IDs
+
+Directory contains:
+
+    segment-1.wal
+    segment-2.wal
+    segment-4.wal
+
+segment 3 is missing.
+
+Possible causes:
+
+- accidental deletion
+- partial filesystem restoration
+- operator error
+- implementation bug
+
+Required policy:
+
+    recovery fails explicitly.
+
+Do not silently assume segment 4 follows segment 2.
+
+## F35 — Duplicate/Invalid Segment Names
+
+Examples:
+
+    segment-000003.wal
+    segment-3-copy.wal
+    foo.wal
+
+Required behavior:
+
+    authoritative segment discovery must use the exact supported naming format.
+
+Unexpected files must not silently participate in recovery.
+
+## F36 — Torn Tail in Sealed Segment
+
+Directory:
+
+    segment-2.wal   <- incomplete tail
+    segment-3.wal   <- valid newer segment
+
+Because segment 3 already became authoritative, segment 2 was expected to be
+complete before rotation.
+
+Required behavior:
+
+    fail recovery.
+
+Do not truncate sealed history silently.
