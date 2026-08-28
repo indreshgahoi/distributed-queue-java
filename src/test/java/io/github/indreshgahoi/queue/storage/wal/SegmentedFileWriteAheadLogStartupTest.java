@@ -4,8 +4,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Instant;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -221,4 +226,134 @@ class SegmentedFileWriteAheadLogStartupTest {
                 )
         );
     }
+       //--------------------------------------------------------------------------------
+      //  Segmented - WAL Recovery Policy Test
+     //-----------------------------------------------------------------------------------
+       @Test
+       void tornTailInActiveSegmentIsRecovered() throws IOException {
+           long segmentTargetBytes =
+                   64;
+
+           WalRecord first =
+                   publishRecord(
+                           "m1",
+                           "large-record-to-trigger-rotation-aaaaaaaa"
+                   );
+
+           WalRecord second =
+                   publishRecord(
+                           "m2",
+                           "B"
+                   );
+
+           /*
+            * Build WAL with at least two segments so segment 1
+            * becomes active.
+            */
+           try (SegmentedFileWriteAheadLog wal =
+                        new SegmentedFileWriteAheadLog(
+                                tempDir,
+                                segmentTargetBytes
+                        )) {
+
+               wal.append(first);
+               wal.append(second);
+           }
+
+           Path activeSegment =
+                   tempDir.resolve(
+                           "segment-000001.wal"
+                   );
+
+           long validSize =
+                   Files.size(
+                           activeSegment
+                   );
+
+           /*
+            * Simulate crash while writing the next frame
+            * to the ACTIVE segment.
+            *
+            * Declare 100 payload bytes but write only 3.
+            */
+           try (FileChannel channel =
+                        FileChannel.open(
+                                activeSegment,
+                                StandardOpenOption.WRITE,
+                                StandardOpenOption.APPEND
+                        )) {
+
+               ByteBuffer length =
+                       ByteBuffer.allocate(
+                               Integer.BYTES
+                       );
+
+               length.putInt(100);
+               length.flip();
+
+               while (length.hasRemaining()) {
+                   channel.write(length);
+               }
+
+               channel.write(
+                       ByteBuffer.wrap(
+                               new byte[]{
+                                       1, 2, 3
+                               }
+                       )
+               );
+           }
+
+           assertTrue(
+                   Files.size(activeSegment)
+                           > validSize
+           );
+
+           /*
+            * Highest segment is active.
+            *
+            * Its incomplete tail may be repaired.
+            */
+           try (SegmentedFileWriteAheadLog recovered =
+                        new SegmentedFileWriteAheadLog(
+                                tempDir,
+                                segmentTargetBytes
+                        )) {
+
+               assertEquals(
+                       List.of(
+                               first,
+                               second
+                       ),
+                       recovered.readAll()
+               );
+           }
+
+           /*
+            * Physical repair should truncate back to the
+            * last valid frame boundary.
+            */
+           assertEquals(
+                   validSize,
+                   Files.size(activeSegment)
+           );
+       }
+
+
+    private WalRecord publishRecord(
+            String messageId,
+            String payload
+    ) {
+        return new WalRecord(
+                WalRecordType.PUBLISH,
+                messageId,
+                payload,
+                null,
+                1,
+                Instant.parse(
+                        "2026-08-22T00:00:00Z"
+                )
+        );
+    }
+
 }

@@ -272,3 +272,112 @@ Revisit when:
 - WAL segmentation is implemented;
 - dedicated WAL writer/group commit is introduced;
 - distributed replication requires logical log indexes.
+
+## v0.12.5 — Segmented WAL
+
+### Decision
+
+Replace unbounded single-file WAL growth with a sequence of WAL segments.
+
+The highest authoritative `.wal` segment is active.
+
+All lower segments are sealed and immutable.
+
+### Motivation
+
+Snapshot-based recovery makes older WAL history logically redundant.
+
+A single WAL file makes physical prefix reclamation difficult because removing
+old bytes would require rewriting the remaining active log.
+
+Segments allow future compaction to delete whole immutable files.
+
+### Segment Size Policy
+
+Segment size is a target rather than a hard limit.
+
+A record that causes the target to be exceeded remains entirely in the current
+segment.
+
+Rotation occurs before the following append.
+
+### Gain
+
+- Sealed WAL history becomes immutable.
+- Frames never cross physical files.
+- Future history reclamation can delete whole segments.
+- Snapshot WalPosition naturally maps to `(segmentId, offset)`.
+- Active-tail crash repair remains localized to the newest segment.
+- No separate manifest or ACTIVE flag is currently required.
+
+### Cost
+
+- More files must be discovered and validated.
+- Segment continuity becomes an invariant.
+- Recovery spans multiple files.
+- Rotation introduces additional failure points.
+- Atomic filesystem rename is part of correctness.
+- Sealed and active segments require different torn-tail policies.
+
+### Authority Trade-off
+
+We derive segment state from filenames:
+
+    highest *.wal = active
+    lower *.wal   = sealed
+    *.tmp         = non-authoritative
+
+This avoids maintaining separate mutable lifecycle metadata.
+
+The trade-off is tighter dependence on filesystem naming and directory
+discovery.
+
+### Recovery Trade-off
+
+Active segment:
+
+    torn tail -> truncate/recover
+
+Sealed segment:
+
+    torn tail -> fail
+
+This is intentionally stricter for sealed history because the existence of a
+newer segment proves the old segment should already have been complete before
+rotation.
+
+### Rotation Failure Policy
+
+Before atomic promotion:
+
+    old segment remains authoritative.
+
+After atomic promotion:
+
+    new segment is authoritative even if the current process fails to open or
+    activate it.
+
+In the latter case, the current WAL instance must stop writing and restart.
+
+### Append Failure Policy
+
+A failed append may leave a partial frame.
+
+The current WAL instance is poisoned so another complete frame can never be
+written behind the torn frame.
+
+Restart repairs the active tail before writes resume.
+
+### Deferred
+
+Not included in this version:
+
+- physical deletion of sealed segments;
+- segment manifest;
+- distributed replication;
+- logical record sequence numbers;
+- multiple concurrent WAL writers;
+- dedicated writer thread;
+- group commit.
+
+These should only be introduced when the corresponding requirement appears.
