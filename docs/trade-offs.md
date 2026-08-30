@@ -381,3 +381,56 @@ Not included in this version:
 - group commit.
 
 These should only be introduced when the corresponding requirement appears.
+
+## v0.13.0 — Snapshot-Authorized WAL Segment Reclamation
+
+### Decision
+
+Use the latest successfully promoted snapshot as the sole authority for
+whole-segment WAL reclamation. Retain the snapshot's segment and every newer
+segment; delete only lower segment IDs.
+
+### Motivation
+
+Without reclamation, segmentation merely converts one unbounded file into an
+unbounded directory. Snapshot promotion already establishes a durable recovery
+point, so it is the natural authorization boundary for removing redundant WAL
+history.
+
+### Gain
+
+- WAL disk usage can shrink without rewriting live log data.
+- Planning is deterministic and independently testable.
+- The boundary segment remains available for replay from the snapshot offset.
+- A partial deletion failure is safe to retry.
+- Failed and stale snapshots cannot expose recovery to premature deletion.
+
+### Cost
+
+- Snapshot commit may report a compaction failure after the snapshot itself is
+  already authoritative; callers must treat reclamation as retryable cleanup.
+- Filesystem deletion errors can leave more history than necessary.
+- Whole-segment reclamation may retain unused bytes before the snapshot offset
+  in the boundary segment.
+- Snapshot commit and deletion are serialized by the coordinator.
+
+### Conservative boundary trade-off
+
+The implementation does not rewrite the boundary segment to recover its unused
+prefix. This sacrifices some disk efficiency in exchange for immutable sealed
+segments, simpler crash recovery, and a much smaller correctness surface.
+
+### Failure policy
+
+Deletion is not transactional. On failure, already deleted segments stay
+deleted and remaining eligible segments stay present. This is safe because the
+authoritative snapshot precedes every delete and each target is independently
+proven redundant.
+
+### Deferred
+
+- boundary-segment prefix rewriting;
+- background/asynchronous reclamation;
+- deletion tombstones or a segment manifest;
+- retention policies independent of recovery safety;
+- coordination with replicas or remote snapshots.

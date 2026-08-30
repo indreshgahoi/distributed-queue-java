@@ -151,31 +151,22 @@ class WalCompactionBoundaryTrackerTest {
     }
 
     @Test
-    void unsupportedWalSegmentCannotBecomeCompactionBoundary() {
+    void segmentedWalPositionCanBecomeCompactionBoundary() {
 
         WalCompactionBoundaryTracker tracker =
                 new WalCompactionBoundaryTracker();
 
-        WalPosition unsupported =
+        WalPosition segmented =
                 new WalPosition(
                         1,
                         100
                 );
 
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> tracker.advanceTo(
-                        unsupported
-                )
-        );
+        tracker.advanceTo(segmented);
 
-        /*
-         * Failed advancement must not create
-         * a boundary.
-         */
-        assertTrue(
-                tracker.currentBoundary()
-                        .isEmpty()
+        assertEquals(
+                segmented,
+                tracker.currentBoundary().orElseThrow()
         );
     }
 

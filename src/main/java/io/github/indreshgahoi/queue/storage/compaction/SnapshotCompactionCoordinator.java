@@ -11,10 +11,23 @@ public final class SnapshotCompactionCoordinator {
 
     private final QueueSnapshotStore snapshotStore;
     private final WalCompactionBoundaryTracker boundaryTracker;
+    private final WalCompactor walCompactor;
 
     public SnapshotCompactionCoordinator(
             QueueSnapshotStore snapshotStore,
             WalCompactionBoundaryTracker boundaryTracker
+    ) {
+        this(
+                snapshotStore,
+                boundaryTracker,
+                new NoOpWalCompactor()
+        );
+    }
+
+    public SnapshotCompactionCoordinator(
+            QueueSnapshotStore snapshotStore,
+            WalCompactionBoundaryTracker boundaryTracker,
+            WalCompactor walCompactor
     ) {
         this.snapshotStore =
                 Objects.requireNonNull(
@@ -27,6 +40,10 @@ public final class SnapshotCompactionCoordinator {
                         boundaryTracker,
                         "boundaryTracker"
                 );
+        this.walCompactor = Objects.requireNonNull(
+                walCompactor,
+                "walCompactor"
+        );
     }
 
     public synchronized void commitSnapshot(
@@ -70,6 +87,15 @@ public final class SnapshotCompactionCoordinator {
          * the boundary to advance.
          */
         boundaryTracker.advanceTo(
+                candidate
+        );
+
+        /*
+         * Only the successfully promoted snapshot may authorize deletion.
+         * Reclamation failure does not invalidate that recovery point and is
+         * safe to retry because every deletion remains before its segment.
+         */
+        walCompactor.compactThrough(
                 candidate
         );
     }

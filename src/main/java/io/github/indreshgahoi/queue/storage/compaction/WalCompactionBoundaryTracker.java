@@ -9,24 +9,12 @@ public final class WalCompactionBoundaryTracker {
 
     private WalPosition boundary;
 
-    /*
-     * Current WAL implementation supports only segment 0.
-     *
-     * This validation will evolve once segmented WAL
-     * support is introduced.
-     */
-    private static final long CURRENT_SEGMENT_ID = 0;
-
     public synchronized void advanceTo(
             WalPosition snapshotPosition
     ) {
         Objects.requireNonNull(
                 snapshotPosition,
                 "snapshotPosition"
-        );
-
-        validateSupportedPosition(
-                snapshotPosition
         );
 
         if (boundary == null) {
@@ -52,16 +40,4 @@ public final class WalCompactionBoundaryTracker {
         );
     }
 
-    private void validateSupportedPosition(
-            WalPosition position
-    ) {
-        if (position.segmentId()
-                != CURRENT_SEGMENT_ID) {
-
-            throw new IllegalArgumentException(
-                    "Unsupported WAL segment for compaction: "
-                            + position.segmentId()
-            );
-        }
-    }
 }

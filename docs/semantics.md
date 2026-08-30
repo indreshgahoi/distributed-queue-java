@@ -1923,5 +1923,60 @@ is meaningful only within the identified segment.
 A newly promoted segment containing only its WAL header is valid and may
 become the active segment before any records are appended.
 
+## v0.13.0 — Snapshot-Authorized WAL Segment Reclamation
 
+### Motivation
+
+Segmentation makes old WAL history physically removable, but does not itself
+authorize removal. A successfully promoted snapshot is the recovery artifact
+that makes an older WAL prefix redundant.
+
+For a snapshot at `WalPosition(S, offset)`, recovery still requires segment S
+from `offset` onward. The conservative whole-file rule is therefore:
+
+    segmentId < S  -> reclaimable
+    segmentId >= S -> retained
+
+The offset does not change that rule. Segment S is retained even when the
+snapshot position is exactly at its end.
+
+### G135 — Only an authoritative snapshot grants deletion authority
+
+A snapshot grants authority only after `QueueSnapshotStore.save(snapshot)`
+returns successfully. A failed save cannot advance the compaction boundary or
+trigger reclamation.
+
+### G136 — Stale snapshots cannot advance deletion authority
+
+A snapshot older than the current committed boundary is rejected before it can
+replace the authoritative snapshot or invoke WAL compaction. Equal positions
+remain idempotent.
+
+### G137 — Reclamation is strictly before the snapshot segment
+
+Given snapshot position `(S, offset)`, only segments with IDs strictly less
+than S may be deleted. The boundary segment S is always retained, including at
+offset zero or the segment's end-of-file.
+
+### G138 — The active segment is never reclaimed
+
+The highest authoritative WAL segment is active. A reclamation request whose
+boundary crosses that segment fails before deletion. A boundary equal to the
+active segment may remove only lower, sealed segments.
+
+### G139 — Partial deletion failure preserves recovery safety
+
+Segments are deleted independently in ascending ID order. If deletion stops
+partway, every deleted file was already strictly before the authoritative
+snapshot segment. The remaining prefix may be safely retried; no rollback or
+all-or-nothing filesystem transaction is required.
+
+### Responsibility split
+
+    authoritative snapshot promotion
+                -> pure planner derives boundary S
+                -> reclaimer deletes segmentId < S
+
+The planner performs no I/O. The reclaimer owns filesystem side effects and
+active-segment protection. Coordinators only enforce ordering and orchestration.
 

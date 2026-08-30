@@ -12,10 +12,65 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class SnapshotCompactionCoordinatorTest {
+
+    @Test
+    void successfulSnapshotCommitAuthorizesWalCompaction() {
+        InMemorySnapshotStore store = new InMemorySnapshotStore();
+        WalCompactionBoundaryTracker tracker =
+                new WalCompactionBoundaryTracker();
+        RecordingWalCompactor compactor =
+                new RecordingWalCompactor();
+        SnapshotCompactionCoordinator coordinator =
+                new SnapshotCompactionCoordinator(
+                        store,
+                        tracker,
+                        compactor
+                );
+
+        WalPosition position = new WalPosition(2, 400);
+        coordinator.commitSnapshot(snapshotAt(position));
+
+        assertEquals(List.of(position), compactor.positions);
+    }
+
+    @Test
+    void failedOrStaleSnapshotDoesNotAuthorizeWalCompaction() {
+        FailOnSecondSaveSnapshotStore store =
+                new FailOnSecondSaveSnapshotStore();
+        WalCompactionBoundaryTracker tracker =
+                new WalCompactionBoundaryTracker();
+        RecordingWalCompactor compactor =
+                new RecordingWalCompactor();
+        SnapshotCompactionCoordinator coordinator =
+                new SnapshotCompactionCoordinator(
+                        store,
+                        tracker,
+                        compactor
+                );
+
+        WalPosition committed = new WalPosition(1, 100);
+        coordinator.commitSnapshot(snapshotAt(committed));
+
+        assertThrows(
+                SnapshotException.class,
+                () -> coordinator.commitSnapshot(
+                        snapshotAt(new WalPosition(2, 100))
+                )
+        );
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> coordinator.commitSnapshot(
+                        snapshotAt(new WalPosition(0, 100))
+                )
+        );
+
+        assertEquals(List.of(committed), compactor.positions);
+    }
 
     @Test
     void successfulSnapshotCommitAdvancesBoundary() {
@@ -542,6 +597,20 @@ class SnapshotCompactionCoordinatorTest {
             return Optional.ofNullable(
                     latest
             );
+        }
+    }
+
+    private static final class RecordingWalCompactor
+            implements WalCompactor {
+
+        private final List<WalPosition> positions =
+                new ArrayList<>();
+
+        @Override
+        public void compactThrough(
+                WalPosition snapshotPosition
+        ) {
+            positions.add(snapshotPosition);
         }
     }
 }
