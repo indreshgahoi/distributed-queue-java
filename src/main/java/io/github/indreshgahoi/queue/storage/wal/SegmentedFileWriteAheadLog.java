@@ -233,6 +233,19 @@ public final class SegmentedFileWriteAheadLog
     }
 
     @Override
+    public synchronized boolean hasCompleteHistory() {
+        ensureOpen();
+
+        List<WalSegment> segments =
+                discovery.discover(
+                        walDirectory
+                );
+
+        return !segments.isEmpty()
+                && segments.getFirst().segmentId() == 0;
+    }
+
+    @Override
     public synchronized void close() {
         if (closed) {
             return;

@@ -434,3 +434,31 @@ proven redundant.
 - deletion tombstones or a segment manifest;
 - retention policies independent of recovery safety;
 - coordination with replicas or remote snapshots.
+
+## v0.14.0 — Fail Closed After WAL Prefix Reclamation
+
+### Decision
+
+Allow missing/corrupt snapshot fallback only while the WAL still begins at
+segment 0. Once an earlier segment prefix has been reclaimed, require a valid
+snapshot and retained suffix as one recovery chain.
+
+### Gain
+
+- prevents silent partial recovery;
+- preserves WAL-only recovery before compaction;
+- reconstructs monotonic snapshot authority after restart;
+- rejects invalid snapshot positions before promotion.
+
+### Cost
+
+- snapshot loss after reclamation is now an availability failure;
+- position validation can scan a segment to prove a frame boundary;
+- segment numbering becomes part of the recovery-authority model.
+
+### Deferred
+
+- a persistent segment manifest;
+- queue-generation or storage-lineage identifiers;
+- remote snapshot restoration;
+- automatic snapshot and reclamation scheduling.

@@ -19,6 +19,73 @@ import static org.junit.jupiter.api.Assertions.*;
 class SnapshotCompactionCoordinatorTest {
 
     @Test
+    void committedSnapshotReconstructsBoundaryAfterCoordinatorRestart() {
+        InMemorySnapshotStore store = new InMemorySnapshotStore();
+        QueueSnapshot committed =
+                snapshotAt(new WalPosition(8, 100));
+        store.save(committed);
+
+        WalCompactionBoundaryTracker tracker =
+                new WalCompactionBoundaryTracker();
+
+        SnapshotCompactionCoordinator coordinator =
+                new SnapshotCompactionCoordinator(
+                        store,
+                        tracker,
+                        position -> { }
+                );
+
+        assertEquals(
+                committed.walPosition(),
+                tracker.currentBoundary().orElseThrow()
+        );
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> coordinator.commitSnapshot(
+                        snapshotAt(new WalPosition(5, 300))
+                )
+        );
+        assertEquals(committed, store.loadLatest().orElseThrow());
+    }
+
+    @Test
+    void invalidWalPositionIsRejectedBeforeSnapshotPromotion() {
+        InMemorySnapshotStore store = new InMemorySnapshotStore();
+        QueueSnapshot committed =
+                snapshotAt(new WalPosition(2, 100));
+        store.save(committed);
+
+        WalCompactionBoundaryTracker tracker =
+                new WalCompactionBoundaryTracker();
+
+        SnapshotCompactionCoordinator coordinator =
+                new SnapshotCompactionCoordinator(
+                        store,
+                        tracker,
+                        position -> {
+                            if (position.segmentId() == 3) {
+                                throw new IllegalArgumentException(
+                                        "invalid WAL position"
+                                );
+                            }
+                        }
+                );
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> coordinator.commitSnapshot(
+                        snapshotAt(new WalPosition(3, 100))
+                )
+        );
+        assertEquals(committed, store.loadLatest().orElseThrow());
+        assertEquals(
+                committed.walPosition(),
+                tracker.currentBoundary().orElseThrow()
+        );
+    }
+
+    @Test
     void successfulSnapshotCommitAuthorizesWalCompaction() {
         InMemorySnapshotStore store = new InMemorySnapshotStore();
         WalCompactionBoundaryTracker tracker =
@@ -29,6 +96,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        position -> { },
                         compactor
                 );
 
@@ -50,6 +118,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        position -> { },
                         compactor
                 );
 
@@ -83,7 +152,8 @@ class SnapshotCompactionCoordinatorTest {
         SnapshotCompactionCoordinator coordinator =
                 new SnapshotCompactionCoordinator(
                         store,
-                        tracker
+                        tracker,
+                        position -> { }
                 );
 
         QueueSnapshot snapshot =
@@ -145,7 +215,8 @@ class SnapshotCompactionCoordinatorTest {
         SnapshotCompactionCoordinator coordinator =
                 new SnapshotCompactionCoordinator(
                         failingStore,
-                        tracker
+                        tracker,
+                        position -> { }
                 );
 
         assertThrows(
@@ -178,7 +249,8 @@ class SnapshotCompactionCoordinatorTest {
         SnapshotCompactionCoordinator coordinator =
                 new SnapshotCompactionCoordinator(
                         store,
-                        tracker
+                        tracker,
+                        position -> { }
                 );
 
         QueueSnapshot newer =
@@ -238,7 +310,8 @@ class SnapshotCompactionCoordinatorTest {
         SnapshotCompactionCoordinator coordinator =
                 new SnapshotCompactionCoordinator(
                         store,
-                        tracker
+                        tracker,
+                        position -> { }
                 );
 
         WalPosition position =
@@ -283,7 +356,8 @@ class SnapshotCompactionCoordinatorTest {
         SnapshotCompactionCoordinator coordinator =
                 new SnapshotCompactionCoordinator(
                         store,
-                        tracker
+                        tracker,
+                        position -> { }
                 );
 
         QueueSnapshot older =
@@ -372,7 +446,8 @@ class SnapshotCompactionCoordinatorTest {
         SnapshotCompactionCoordinator coordinator =
                 new SnapshotCompactionCoordinator(
                         store,
-                        tracker
+                        tracker,
+                        position -> { }
                 );
 
         QueueSnapshot firstSnapshot =
@@ -462,7 +537,8 @@ class SnapshotCompactionCoordinatorTest {
         SnapshotCompactionCoordinator coordinator =
                 new SnapshotCompactionCoordinator(
                         store,
-                        tracker
+                        tracker,
+                        position -> { }
                 );
 
         coordinator.commitSnapshot(first);

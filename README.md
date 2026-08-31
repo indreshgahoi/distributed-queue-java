@@ -14,7 +14,14 @@ behave under failure.
 
 ## Current Scope
 
-v0.1 — Single-process in-memory FIFO queue.
+Latest release: v0.13.0 — snapshot-authorized WAL segment reclamation.
+
+Current development: v0.14.0 — compaction-aware recovery authority. A queue
+with reclaimed WAL history requires its authoritative snapshot and fails
+closed rather than replaying an incomplete WAL suffix.
+
+The implementation remains a single-node/local queue engine. Networking,
+replication, partition ownership, and leader election are not yet included.
 
 ## Design Principles
 

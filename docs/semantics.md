@@ -1980,3 +1980,40 @@ all-or-nothing filesystem transaction is required.
 The planner performs no I/O. The reclaimer owns filesystem side effects and
 active-segment protection. Coordinators only enforce ordering and orchestration.
 
+## v0.14.0 — Compaction-Aware Recovery Authority
+
+### G140 — WAL-only recovery requires complete history
+
+Recovery may fall back to `readAll()` only when the WAL still begins with
+segment 0. A segmented WAL whose earliest authoritative segment is greater
+than 0 is a retained suffix, not a complete recovery source.
+
+### G141 — A reclaimed WAL prefix makes the snapshot mandatory
+
+If WAL history before the earliest retained segment has been reclaimed, a
+missing, unreadable, or invalid authoritative snapshot must fail recovery.
+The queue must never start from the retained suffix alone.
+
+### G142 — Recovery proves the snapshot boundary before availability
+
+Snapshot recovery must validate that the snapshot `WalPosition` names an
+available WAL segment and a valid frame boundary. Failure is a startup error;
+it must not produce a partially recovered queue.
+
+### G143 — Snapshot authority is reconstructed after restart
+
+The latest committed snapshot position initializes the compaction boundary
+when a snapshot/compaction coordinator is created. Restart must not erase the
+monotonic authority established by an earlier committed snapshot.
+
+### G144 — Candidate position validation precedes snapshot promotion
+
+A candidate snapshot must reference a valid position in the current WAL
+before it may replace the authoritative snapshot. Validation failure must
+leave both the previous snapshot and compaction boundary unchanged.
+
+### G145 — Complete WAL preserves pre-compaction fallback
+
+When authoritative WAL history still begins at segment 0, a missing or corrupt
+snapshot remains an optional optimization failure. Recovery may ignore it and
+replay the complete WAL.

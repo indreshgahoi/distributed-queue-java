@@ -635,10 +635,12 @@ public final class LocalMessageQueue
 
             } else {
                 /*
-                 * No usable snapshot.
-                 *
-                 * WAL remains the authoritative recovery source.
+                 * WAL-only recovery is valid only while the WAL still
+                 * contains its initial history. Once segment 0 has been
+                 * reclaimed, the snapshot is part of the durable authority
+                 * chain and cannot be treated as optional.
                  */
+                requireCompleteWalHistoryForFallback();
                 recordsToReplay =
                         wal.readAll();
             }
@@ -924,19 +926,33 @@ public final class LocalMessageQueue
                     .loadLatest();
 
         } catch (SnapshotException e) {
-
-            /*
-             * v0.12.2 recovery policy:
-             *
-             * Snapshot is an optimization/recovery checkpoint.
-             * WAL is still complete because compaction has not
-             * been introduced yet.
-             *
-             * Therefore a corrupt snapshot can be ignored and
-             * recovery falls back to full WAL replay.
-             */
+            requireCompleteWalHistoryForFallback(e);
             return Optional.empty();
         }
+    }
+
+    private void requireCompleteWalHistoryForFallback() {
+        requireCompleteWalHistoryForFallback(null);
+    }
+
+    private void requireCompleteWalHistoryForFallback(
+            SnapshotException snapshotFailure
+    ) {
+        if (wal.hasCompleteHistory()) {
+            return;
+        }
+
+        String message =
+                "Authoritative snapshot is required because the WAL prefix has been reclaimed";
+
+        if (snapshotFailure == null) {
+            throw new SnapshotException(message);
+        }
+
+        throw new SnapshotException(
+                message,
+                snapshotFailure
+        );
     }
 
     private void materializeRecoveredState(

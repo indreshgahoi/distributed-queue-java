@@ -4,11 +4,15 @@ import io.github.indreshgahoi.queue.storage.WalPosition;
 import io.github.indreshgahoi.queue.storage.snapshot.FileQueueSnapshotStore;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshot;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshotStore;
+import io.github.indreshgahoi.queue.storage.snapshot.SnapshotException;
 import io.github.indreshgahoi.queue.storage.wal.FileWriteAheadLog;
+import io.github.indreshgahoi.queue.storage.wal.SegmentedFileWriteAheadLog;
+import io.github.indreshgahoi.queue.storage.wal.WalSegmentReclaimer;
 import io.github.indreshgahoi.queue.storage.wal.WriteAheadLog;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -697,6 +701,148 @@ class LocalMessageQueueSnapshotRecoveryTest {
         }
     }
 
+    @Test
+    void missingSnapshotFailsRecoveryAfterWalPrefixReclamation()
+            throws Exception {
+        Path walDirectory = tempDir.resolve("wal-missing-snapshot");
+        Path snapshotPath = tempDir.resolve("required.snapshot");
+
+        createSnapshotAndReclaimInitialSegment(
+                walDirectory,
+                snapshotPath
+        );
+        Files.delete(snapshotPath);
+
+        try (WriteAheadLog wal =
+                     new SegmentedFileWriteAheadLog(
+                             walDirectory,
+                             9
+                     )) {
+            assertThrows(
+                    SnapshotException.class,
+                    () -> new LocalMessageQueue(
+                            clockAt("2026-08-23T10:00:00Z"),
+                            new QueueConfiguration(),
+                            wal,
+                            snapshotStore(snapshotPath)
+                    )
+            );
+        }
+    }
+
+    @Test
+    void validSnapshotRecoversQueueAfterWalPrefixReclamation() {
+        Path walDirectory = tempDir.resolve("wal-valid-snapshot");
+        Path snapshotPath = tempDir.resolve("valid.snapshot");
+
+        createSnapshotAndReclaimInitialSegment(
+                walDirectory,
+                snapshotPath
+        );
+
+        try (WriteAheadLog wal =
+                     new SegmentedFileWriteAheadLog(
+                             walDirectory,
+                             9
+                     );
+             LocalMessageQueue recovered =
+                     new LocalMessageQueue(
+                             clockAt("2026-08-23T10:00:00Z"),
+                             new QueueConfiguration(),
+                             wal,
+                             snapshotStore(snapshotPath)
+                     )) {
+            assertEquals(
+                    "before-rotation",
+                    recovered.receive()
+                            .orElseThrow()
+                            .message()
+                            .payload()
+            );
+            assertEquals(
+                    "after-rotation",
+                    recovered.receive()
+                            .orElseThrow()
+                            .message()
+                            .payload()
+            );
+        }
+    }
+
+    @Test
+    void corruptSnapshotFailsRecoveryAfterWalPrefixReclamation()
+            throws Exception {
+        Path walDirectory = tempDir.resolve("wal-corrupt-snapshot");
+        Path snapshotPath = tempDir.resolve("corrupt.snapshot");
+
+        createSnapshotAndReclaimInitialSegment(
+                walDirectory,
+                snapshotPath
+        );
+        Files.write(
+                snapshotPath,
+                new byte[]{1, 2, 3}
+        );
+
+        try (WriteAheadLog wal =
+                     new SegmentedFileWriteAheadLog(
+                             walDirectory,
+                             9
+                     )) {
+            assertThrows(
+                    SnapshotException.class,
+                    () -> new LocalMessageQueue(
+                            clockAt("2026-08-23T10:00:00Z"),
+                            new QueueConfiguration(),
+                            wal,
+                            snapshotStore(snapshotPath)
+                    )
+            );
+        }
+    }
+
+    @Test
+    void corruptSnapshotFallsBackWhenWalHistoryIsComplete()
+            throws Exception {
+        Path walPath = tempDir.resolve("complete.wal");
+        Path snapshotPath = tempDir.resolve("optional.snapshot");
+        MutableClock clock =
+                clockAt("2026-08-23T10:00:00Z");
+
+        try (LocalMessageQueue queue =
+                     createQueue(
+                             walPath,
+                             snapshotPath,
+                             clock,
+                             new QueueConfiguration()
+                     )) {
+            queue.publish("recover-from-complete-wal");
+            snapshotStore(snapshotPath)
+                    .save(queue.captureSnapshot());
+        }
+
+        Files.write(
+                snapshotPath,
+                new byte[]{1, 2, 3}
+        );
+
+        try (LocalMessageQueue recovered =
+                     createQueue(
+                             walPath,
+                             snapshotPath,
+                             clock,
+                             new QueueConfiguration()
+                     )) {
+            assertEquals(
+                    "recover-from-complete-wal",
+                    recovered.receive()
+                            .orElseThrow()
+                            .message()
+                            .payload()
+            );
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Architectural equivalence
     // ---------------------------------------------------------------------
@@ -865,6 +1011,41 @@ class LocalMessageQueueSnapshotRecoveryTest {
         return new FileQueueSnapshotStore(
                 snapshotPath
         );
+    }
+
+    private void createSnapshotAndReclaimInitialSegment(
+            Path walDirectory,
+            Path snapshotPath
+    ) {
+        MutableClock clock =
+                clockAt("2026-08-23T10:00:00Z");
+
+        try (WriteAheadLog wal =
+                     new SegmentedFileWriteAheadLog(
+                             walDirectory,
+                             9
+                     );
+             LocalMessageQueue queue =
+                     new LocalMessageQueue(
+                             clock,
+                             new QueueConfiguration(),
+                             wal,
+                             snapshotStore(snapshotPath)
+                     )) {
+            queue.publish("before-rotation");
+            queue.publish("after-rotation");
+
+            QueueSnapshot snapshot =
+                    queue.captureSnapshot();
+
+            snapshotStore(snapshotPath)
+                    .save(snapshot);
+
+            new WalSegmentReclaimer(walDirectory)
+                    .reclaimBefore(
+                            snapshot.walPosition().segmentId()
+                    );
+        }
     }
 
     private MutableClock clockAt(

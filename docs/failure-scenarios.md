@@ -942,3 +942,50 @@ Required behavior:
     fail recovery.
 
 Do not truncate sealed history silently.
+
+## F37 — Snapshot Missing After WAL Prefix Reclamation
+
+The authoritative snapshot covers history before segment 7. Segments 0–6
+have been reclaimed, but the snapshot is later missing at restart.
+
+Required behavior:
+
+    fail startup explicitly
+
+The retained WAL suffix must never be mistaken for complete history.
+
+## F38 — Snapshot Corrupt After WAL Prefix Reclamation
+
+The WAL begins at segment 7 and the committed snapshot fails checksum or
+format validation.
+
+Required behavior:
+
+    fail startup explicitly
+
+Falling back to `readAll()` would silently omit state represented only by the
+snapshot.
+
+## F39 — Stale Snapshot Commit After Coordinator Restart
+
+The committed snapshot is at `(8, 100)` and earlier WAL segments have already
+been reclaimed. After restart, a caller attempts to commit `(5, 300)`.
+
+Required behavior:
+
+    reconstruct boundary (8, 100) from committed snapshot
+    reject stale candidate before replacement
+
+Restart must not reset monotonic snapshot authority.
+
+## F40 — Candidate Snapshot References Invalid WAL Position
+
+A candidate snapshot names an unknown segment or a byte offset that is not a
+frame boundary.
+
+Required behavior:
+
+    reject candidate before promotion
+    preserve previous authoritative snapshot
+    do not advance boundary
+    do not reclaim WAL history

@@ -12,14 +12,17 @@ public final class SnapshotCompactionCoordinator {
     private final QueueSnapshotStore snapshotStore;
     private final WalCompactionBoundaryTracker boundaryTracker;
     private final WalCompactor walCompactor;
+    private final SnapshotPositionValidator positionValidator;
 
     public SnapshotCompactionCoordinator(
             QueueSnapshotStore snapshotStore,
-            WalCompactionBoundaryTracker boundaryTracker
+            WalCompactionBoundaryTracker boundaryTracker,
+            SnapshotPositionValidator positionValidator
     ) {
         this(
                 snapshotStore,
                 boundaryTracker,
+                positionValidator,
                 new NoOpWalCompactor()
         );
     }
@@ -27,6 +30,7 @@ public final class SnapshotCompactionCoordinator {
     public SnapshotCompactionCoordinator(
             QueueSnapshotStore snapshotStore,
             WalCompactionBoundaryTracker boundaryTracker,
+            SnapshotPositionValidator positionValidator,
             WalCompactor walCompactor
     ) {
         this.snapshotStore =
@@ -44,6 +48,12 @@ public final class SnapshotCompactionCoordinator {
                 walCompactor,
                 "walCompactor"
         );
+        this.positionValidator = Objects.requireNonNull(
+                positionValidator,
+                "positionValidator"
+        );
+
+        initializeBoundaryFromAuthoritativeSnapshot();
     }
 
     public synchronized void commitSnapshot(
@@ -76,6 +86,8 @@ public final class SnapshotCompactionCoordinator {
             );
         }
 
+        positionValidator.validate(candidate);
+
         /*
          * Only after validation may the snapshot
          * become authoritative.
@@ -98,5 +110,17 @@ public final class SnapshotCompactionCoordinator {
         walCompactor.compactThrough(
                 candidate
         );
+    }
+
+    private void initializeBoundaryFromAuthoritativeSnapshot() {
+        snapshotStore.loadLatest()
+                .ifPresent(snapshot -> {
+                    positionValidator.validate(
+                            snapshot.walPosition()
+                    );
+                    boundaryTracker.advanceTo(
+                            snapshot.walPosition()
+                    );
+                });
     }
 }
