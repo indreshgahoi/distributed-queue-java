@@ -462,3 +462,32 @@ snapshot and retained suffix as one recovery chain.
 - queue-generation or storage-lineage identifiers;
 - remote snapshot restoration;
 - automatic snapshot and reclamation scheduling.
+
+## v0.15.0 — Force Parent Directories at Authority Boundaries
+
+### Decision
+
+Force the containing directory after snapshot promotion, WAL segment creation
+or promotion, and each reclaimed segment deletion. Do not silently accept
+filesystems that cannot provide this operation.
+
+### Gain
+
+- aligns reported durability with both file data and filesystem namespace;
+- prevents promoted segment names from being treated as durable too early;
+- prevents failed snapshot metadata durability from authorizing compaction;
+- makes deletion progress durable in the same order it is observed.
+
+### Cost
+
+- adds synchronous filesystem operations to infrequent lifecycle paths;
+- directory forcing is filesystem and operating-system dependent;
+- failure after atomic promotion is inherently indeterminate and requires
+  fail-closed handling rather than rollback claims.
+
+### Deferred
+
+- batching deletion metadata forces;
+- a storage abstraction for non-POSIX filesystems;
+- filesystem-specific durability certification;
+- replicated durability.

@@ -305,4 +305,63 @@ class WalSegmentReclaimerTest {
         assertTrue(Files.exists(files.pathFor(tempDir, 3)));
     }
 
+    @Test
+    void reclaimedSegmentDeletionForcesParentDirectory()
+            throws IOException {
+        WalSegmentInitializer initializer =
+                new WalSegmentInitializer();
+        WalSegmentFiles files = new WalSegmentFiles();
+
+        initializer.initialize(files.pathFor(tempDir, 0));
+        initializer.initialize(files.pathFor(tempDir, 1));
+
+        boolean[] directoryForced = {false};
+
+        WalSegmentReclaimer reclaimer =
+                new WalSegmentReclaimer(
+                        tempDir,
+                        Files::delete,
+                        deletedPath -> {
+                            assertFalse(Files.exists(deletedPath));
+                            directoryForced[0] = true;
+                        }
+                );
+
+        reclaimer.reclaimBefore(1);
+
+        assertTrue(directoryForced[0]);
+    }
+
+    @Test
+    void directoryForceFailureStopsFurtherReclamation()
+            throws IOException {
+        WalSegmentInitializer initializer =
+                new WalSegmentInitializer();
+        WalSegmentFiles files = new WalSegmentFiles();
+
+        for (long id = 0; id <= 2; id++) {
+            initializer.initialize(files.pathFor(tempDir, id));
+        }
+
+        WalSegmentReclaimer reclaimer =
+                new WalSegmentReclaimer(
+                        tempDir,
+                        Files::delete,
+                        deletedPath -> {
+                            throw new IOException(
+                                    "simulated directory force failure"
+                            );
+                        }
+                );
+
+        assertThrows(
+                WalException.class,
+                () -> reclaimer.reclaimBefore(2)
+        );
+
+        assertFalse(Files.exists(files.pathFor(tempDir, 0)));
+        assertTrue(Files.exists(files.pathFor(tempDir, 1)));
+        assertTrue(Files.exists(files.pathFor(tempDir, 2)));
+    }
+
 }

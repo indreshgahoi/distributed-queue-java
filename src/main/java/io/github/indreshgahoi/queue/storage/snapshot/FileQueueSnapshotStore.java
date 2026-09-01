@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.snapshot;
 
+import io.github.indreshgahoi.queue.storage.DirectoryDurability;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 
 import java.io.IOException;
@@ -61,6 +62,7 @@ public final class FileQueueSnapshotStore
     private final CandidateWriter candidateWriter;
     private final CandidateForcer candidateForcer;
     private final SnapshotPromoter snapshotPromoter;
+    private final DirectoryForcer directoryForcer;
 
     public FileQueueSnapshotStore(
             Path snapshotPath
@@ -69,7 +71,8 @@ public final class FileQueueSnapshotStore
                 snapshotPath,
                 FileQueueSnapshotStore::writeCandidate,
                 FileQueueSnapshotStore::forceCandidate,
-                FileQueueSnapshotStore::promoteCandidate
+                FileQueueSnapshotStore::promoteCandidate,
+                DirectoryDurability::forceParent
         );
     }
 
@@ -82,6 +85,22 @@ public final class FileQueueSnapshotStore
             CandidateWriter candidateWriter,
             CandidateForcer candidateForcer,
             SnapshotPromoter snapshotPromoter
+    ) {
+        this(
+                snapshotPath,
+                candidateWriter,
+                candidateForcer,
+                snapshotPromoter,
+                DirectoryDurability::forceParent
+        );
+    }
+
+    FileQueueSnapshotStore(
+            Path snapshotPath,
+            CandidateWriter candidateWriter,
+            CandidateForcer candidateForcer,
+            SnapshotPromoter snapshotPromoter,
+            DirectoryForcer directoryForcer
     ) {
         this.snapshotPath =
                 Objects.requireNonNull(
@@ -111,6 +130,11 @@ public final class FileQueueSnapshotStore
                 Objects.requireNonNull(
                         snapshotPromoter,
                         "snapshotPromoter"
+                );
+        this.directoryForcer =
+                Objects.requireNonNull(
+                        directoryForcer,
+                        "directoryForcer"
                 );
     }
 
@@ -186,6 +210,8 @@ public final class FileQueueSnapshotStore
 
         buffer.flip();
 
+        boolean promoted = false;
+
         try {
             /*
              * Stage 1
@@ -222,21 +248,26 @@ public final class FileQueueSnapshotStore
                     tempPath,
                     snapshotPath
             );
+            promoted = true;
+
+            directoryForcer.force(
+                    snapshotPath
+            );
 
         } catch (IOException e) {
 
             /*
-             * Candidate creation/promotion failed.
-             *
-             * Best-effort cleanup of temporary state.
-             *
-             * snapshotPath must remain the previous
-             * authoritative recovery point.
+             * Before promotion, the previous snapshot remains authoritative.
+             * After promotion, a directory-force failure means publication is
+             * indeterminate across power loss. In both cases save must fail,
+             * so callers cannot authorize compaction from this attempt.
              */
             deleteCandidateBestEffort();
 
             throw new SnapshotException(
-                    "Failed to save queue snapshot",
+                    promoted
+                            ? "Snapshot promotion completed but directory durability failed"
+                            : "Failed to save queue snapshot",
                     e
             );
         }
@@ -957,6 +988,14 @@ public final class FileQueueSnapshotStore
         void promote(
                 Path candidate,
                 Path destination
+        ) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface DirectoryForcer {
+
+        void force(
+                Path publishedPath
         ) throws IOException;
     }
 }

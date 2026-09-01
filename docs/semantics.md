@@ -2017,3 +2017,54 @@ leave both the previous snapshot and compaction boundary unchanged.
 When authoritative WAL history still begins at segment 0, a missing or corrupt
 snapshot remains an optional optimization failure. Recovery may ignore it and
 replay the complete WAL.
+
+## v0.15.0 — Durable Filesystem Authority Transitions
+
+### G146 — File durability and name durability are separate boundaries
+
+For a newly created, promoted, replaced, or deleted durable artifact,
+`FileChannel.force(true)` on file contents does not by itself establish the
+durability of the containing directory entry.
+
+### G147 — Snapshot promotion succeeds only after directory durability
+
+Required success order:
+
+    write candidate
+    -> force candidate file
+    -> atomic promotion
+    -> force parent directory
+    -> report success
+
+Only a save that completes this sequence may authorize WAL reclamation.
+
+### G148 — Post-promotion snapshot failure is indeterminate but safe
+
+If snapshot rename succeeds and parent-directory force fails, `save()` must
+report failure. The new name may be visible in the running process, but its
+survival across power loss is not guaranteed. Compaction must not be
+authorized by that failed attempt.
+
+### G149 — WAL segment publication includes directory durability
+
+Initial segment creation and rotated-segment promotion must force the WAL
+directory before the segment publication operation reports success or accepts
+records whose durability depends on the new name.
+
+### G150 — Post-promotion WAL failure poisons the writer
+
+If a new `.wal` segment is atomically promoted but directory force fails, the
+current WAL instance must reject further appends. Restart re-discovers the
+authoritative on-disk segment set and re-establishes directory durability.
+
+### G151 — Segment deletion includes directory durability
+
+After deleting each reclaimable segment, the WAL directory must be forced
+before reclamation proceeds to another segment. A directory-force failure
+stops reclamation and is safe to retry.
+
+### G152 — Filesystem support is required explicitly
+
+If the platform cannot open and force the parent directory, an authority
+transition requiring directory durability fails. The implementation must not
+silently downgrade its durability contract.

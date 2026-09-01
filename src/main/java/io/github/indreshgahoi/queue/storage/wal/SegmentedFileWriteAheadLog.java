@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.DirectoryDurability;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 
 import java.io.IOException;
@@ -25,6 +26,7 @@ public final class SegmentedFileWriteAheadLog
     private final SegmentPromoter segmentPromoter;
     private final FrameWriter frameWriter;
     private final ActiveSegmentOpener activeSegmentOpener;
+    private final DirectoryForcer directoryForcer;
 
     private long activeSegmentId;
     private FileChannel activeChannel;
@@ -40,7 +42,8 @@ public final class SegmentedFileWriteAheadLog
                 segmentTargetBytes,
                 SegmentedFileWriteAheadLog::promoteSegment,
                 SegmentedFileWriteAheadLog::writeFrame,
-                SegmentedFileWriteAheadLog::openAppendChannel
+                SegmentedFileWriteAheadLog::openAppendChannel,
+                DirectoryDurability::forceParent
         );
     }
 
@@ -54,6 +57,24 @@ public final class SegmentedFileWriteAheadLog
             SegmentPromoter segmentPromoter,
             FrameWriter frameWriter,
             ActiveSegmentOpener activeSegmentOpener
+    ) {
+        this(
+                walDirectory,
+                segmentTargetBytes,
+                segmentPromoter,
+                frameWriter,
+                activeSegmentOpener,
+                DirectoryDurability::forceParent
+        );
+    }
+
+    SegmentedFileWriteAheadLog(
+            Path walDirectory,
+            long segmentTargetBytes,
+            SegmentPromoter segmentPromoter,
+            FrameWriter frameWriter,
+            ActiveSegmentOpener activeSegmentOpener,
+            DirectoryForcer directoryForcer
     ) {
         this.walDirectory =
                 Objects.requireNonNull(
@@ -75,6 +96,11 @@ public final class SegmentedFileWriteAheadLog
                 Objects.requireNonNull(
                         activeSegmentOpener,
                         "activeSegmentOpener"
+                );
+        this.directoryForcer =
+                Objects.requireNonNull(
+                        directoryForcer,
+                        "directoryForcer"
                 );
 
         if (segmentTargetBytes
@@ -280,6 +306,9 @@ public final class SegmentedFileWriteAheadLog
             }
 
             validateSegments(segments);
+            directoryForcer.force(
+                    segments.getLast().path()
+            );
             openActiveSegment(segments.getLast());
 
         } catch (IOException e) {
@@ -320,6 +349,7 @@ public final class SegmentedFileWriteAheadLog
                 );
 
         initializer.initialize(path);
+        directoryForcer.force(path);
         openActiveSegment(
                 new WalSegment(segmentId, path)
         );
@@ -392,6 +422,8 @@ public final class SegmentedFileWriteAheadLog
                     destination
             );
             promoted = true;
+
+            directoryForcer.force(destination);
 
             /*
              * The promoted .wal is now authoritative. Opening must use the
@@ -768,6 +800,14 @@ public final class SegmentedFileWriteAheadLog
         void write(
                 FileChannel channel,
                 ByteBuffer frame
+        ) throws IOException;
+    }
+
+    @FunctionalInterface
+    interface DirectoryForcer {
+
+        void force(
+                Path publishedPath
         ) throws IOException;
     }
 }

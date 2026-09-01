@@ -1910,6 +1910,60 @@ class SegmentedFileWriteAheadLogTest {
     }
 
 
+    @Test
+    void directoryForceFailureAfterPromotionPoisonsWalAndRestartUsesNewSegment() {
+        int[] directoryForceCalls = {0};
+
+        SegmentedFileWriteAheadLog wal =
+                new SegmentedFileWriteAheadLog(
+                        tempDir,
+                        9,
+                        SegmentedFileWriteAheadLog::promoteSegment,
+                        SegmentedFileWriteAheadLog::writeFrame,
+                        SegmentedFileWriteAheadLog::openAppendChannel,
+                        publishedPath -> {
+                            directoryForceCalls[0]++;
+                            if (directoryForceCalls[0] == 2) {
+                                throw new IOException(
+                                        "simulated directory force failure"
+                                );
+                            }
+                        }
+                );
+
+        WalRecord first = publishRecord("m-1", "first");
+        WalRecord rejected = publishRecord("m-2", "rejected");
+
+        wal.append(first);
+
+        assertThrows(
+                WalException.class,
+                () -> wal.append(rejected)
+        );
+        assertThrows(
+                WalException.class,
+                () -> wal.append(
+                        publishRecord("m-3", "also-rejected")
+                )
+        );
+        wal.close();
+
+        try (SegmentedFileWriteAheadLog recovered =
+                     new SegmentedFileWriteAheadLog(
+                             tempDir,
+                             9
+                     )) {
+            assertEquals(
+                    List.of(first),
+                    recovered.readAll()
+            );
+            assertEquals(
+                    1,
+                    recovered.currentDurablePosition().segmentId()
+            );
+        }
+    }
+
     private WalRecord publishRecord(
             String messageId,
             String payload

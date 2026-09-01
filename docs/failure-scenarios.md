@@ -989,3 +989,42 @@ Required behavior:
     preserve previous authoritative snapshot
     do not advance boundary
     do not reclaim WAL history
+
+## F41 — Power Loss After Snapshot Rename
+
+The snapshot candidate is forced and atomically renamed, but the containing
+directory entry has not crossed a durability boundary before power loss.
+
+Required behavior:
+
+    force the parent directory after rename
+    report snapshot save success only after that force succeeds
+
+If directory force fails, compaction must not begin.
+
+## F42 — Power Loss After WAL Segment Promotion
+
+A new segment is forced and renamed from `.tmp` to `.wal`, but its directory
+entry is not durable. An append into that segment must not be reported durable
+while the segment name itself can disappear after power loss.
+
+Required behavior:
+
+    force WAL directory after promotion
+    poison writer if the post-promotion force fails
+    require restart before another append
+
+## F43 — Segment Deletion Metadata Is Not Durable
+
+Several reclaimed segment files are deleted without forcing the directory.
+After power loss, deletion persistence may differ from the order observed by
+the process and can expose an unexpected prefix or gap.
+
+Required behavior:
+
+    delete one eligible segment
+    force WAL directory
+    only then continue to the next segment
+
+A force failure stops cleanup; recovery safety remains more important than
+reclaiming all eligible space.

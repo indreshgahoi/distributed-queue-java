@@ -22,6 +22,61 @@ class FileQueueSnapshotStoreTest {
     Path tempDir;
 
     @Test
+    void saveForcesParentDirectoryAfterSnapshotPromotion() {
+        Path snapshotPath = tempDir.resolve("queue.snapshot");
+        boolean[] promoted = {false};
+        boolean[] directoryForced = {false};
+
+        FileQueueSnapshotStore store =
+                new FileQueueSnapshotStore(
+                        snapshotPath,
+                        (candidate, data) -> { },
+                        candidate -> { },
+                        (candidate, destination) ->
+                                promoted[0] = true,
+                        publishedPath -> {
+                            assertTrue(promoted[0]);
+                            assertEquals(snapshotPath, publishedPath);
+                            directoryForced[0] = true;
+                        }
+                );
+
+        store.save(snapshot(new WalPosition(0, 8), "A"));
+
+        assertTrue(directoryForced[0]);
+    }
+
+    @Test
+    void directoryForceFailureDoesNotReportSnapshotCommitSuccess() {
+        Path snapshotPath = tempDir.resolve("queue.snapshot");
+
+        FileQueueSnapshotStore store =
+                new FileQueueSnapshotStore(
+                        snapshotPath,
+                        FileQueueSnapshotStore::writeCandidate,
+                        FileQueueSnapshotStore::forceCandidate,
+                        FileQueueSnapshotStore::promoteCandidate,
+                        publishedPath -> {
+                            throw new IOException(
+                                    "simulated directory force failure"
+                            );
+                        }
+                );
+
+        assertThrows(
+                SnapshotException.class,
+                () -> store.save(
+                        snapshot(new WalPosition(0, 8), "A")
+                )
+        );
+
+        assertTrue(
+                Files.exists(snapshotPath),
+                "promotion happened before directory durability failed"
+        );
+    }
+
+    @Test
     void saveThenLoadReturnsEquivalentSnapshot() {
         Path snapshotPath =
                 tempDir.resolve("queue.snapshot");
