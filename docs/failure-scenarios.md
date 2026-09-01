@@ -1119,3 +1119,67 @@ Required behavior:
     validate lineage before snapshot promotion
     preserve the prior snapshot and boundary on mismatch
     perform no WAL deletion
+
+## F52 — Create Response Is Lost After Database Commit
+
+PostgreSQL commits queue creation, but the service or network fails before the
+client receives its response.
+
+Required behavior:
+
+    retry with the same tenant-scoped idempotency key
+    return the originally allocated queue and generation IDs
+    never create a second descriptor
+
+## F53 — Idempotency Key Is Reused for Different Parameters
+
+A client accidentally reuses a create key for another queue name.
+
+Required behavior:
+
+    compare the canonical request hash inside the transaction
+    reject the conflicting request
+    preserve the original response mapping
+
+## F54 — Concurrent Creates Target One Queue Name
+
+Different requests concurrently create the same tenant/name.
+
+Required behavior:
+
+    commit at most one live descriptor
+    reject the loser through the database uniqueness boundary
+    roll back the loser's idempotency reservation
+
+## F55 — Stale Provisioner Completes a Transition
+
+A delayed worker reports completion after another actor already changed the
+descriptor, or after the queue generation was replaced.
+
+Required behavior:
+
+    compare generation ID, expected state, and metadata version
+    update exactly one row or fail as stale
+    never overwrite newer authority
+
+## F56 — Metadata Commits but Queue Storage Does Not Exist
+
+Queue creation commits while no queue node has yet created lineage-matched
+storage.
+
+Required behavior:
+
+    expose the descriptor as PROVISIONING, not ACTIVE
+    do not route data-plane operations to it
+    leave provisioning and reconciliation to the next milestone
+
+## F57 — Delete Is Interrupted Before Physical Cleanup
+
+The descriptor reaches `DELETING`, but the process fails before storage is
+removed or deletion is completed.
+
+Required behavior:
+
+    preserve DELETING across service restart
+    make repeated customer deletion idempotent
+    do not free the live tenant/name until DELETED is authoritative

@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: queue_metadata
+      POSTGRES_USER: queue
+      POSTGRES_PASSWORD: queue
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queue -d queue_metadata"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+    volumes:
+      - queue-metadata-postgres:/var/lib/postgresql/data
+
+  metadata-service:
+    build:
+      context: .
+      dockerfile: metadata-service/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      METADATA_DATABASE_URL: jdbc:postgresql://postgres:5432/queue_metadata
+      METADATA_DATABASE_USER: queue
+      METADATA_DATABASE_PASSWORD: queue
+      METADATA_HTTP_PORT: 8080
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  queue-metadata-postgres:

@@ -554,3 +554,37 @@ transitions. Reject pre-lineage formats instead of adding migration machinery.
 - queue namespace and customer tenancy metadata;
 - partition routing and ownership epochs;
 - replicated generation creation and consensus-backed metadata.
+
+## v0.18.0 — PostgreSQL Metadata Authority
+
+### Decision
+
+Introduce an independently packaged Spring Boot metadata service whose durable
+repository is PostgreSQL. Use database transactions for idempotent creation,
+conditional updates for lifecycle fencing, and Flyway for schema authority.
+Keep message data in the separate `queue-core` module.
+
+### Gain
+
+- provides a shared, durable multi-tenant queue namespace;
+- makes ambiguous create retries safe;
+- exposes lifecycle progress instead of hiding cross-resource partial work;
+- introduces generation and version fencing before distributed provisioning;
+- allows multiple future service instances to share metadata authority.
+
+### Cost
+
+- PostgreSQL becomes an operational dependency and availability boundary;
+- the service adds a REST API and database connection-pool management concerns;
+- metadata and queue storage cannot participate in one atomic transaction;
+- schema evolution now requires an explicit production migration strategy;
+- Spring Boot becomes part of the control-plane runtime dependency surface.
+
+### Deferred
+
+- queue-node registration and storage provisioning;
+- reconciliation of stuck lifecycle states;
+- partition placement and ownership epochs;
+- authentication, authorization, quotas, and rate limits;
+- schema rollback policy and zero-downtime migration compatibility;
+- metadata replication beyond PostgreSQL's own deployment model.

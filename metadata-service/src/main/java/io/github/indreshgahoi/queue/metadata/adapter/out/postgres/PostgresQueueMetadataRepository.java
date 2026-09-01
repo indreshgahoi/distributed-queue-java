@@ -1,0 +1,605 @@
+package io.github.indreshgahoi.queue.metadata.adapter.out.postgres;
+
+import io.github.indreshgahoi.queue.metadata.application.port.out.QueueMetadataRepository;
+import io.github.indreshgahoi.queue.metadata.domain.exception.IdempotencyConflictException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.MetadataUnavailableException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.QueueAlreadyExistsException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.QueueMetadataException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.StaleQueueMetadataException;
+import io.github.indreshgahoi.queue.metadata.domain.model.CreateQueueCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.QueueDescriptor;
+import io.github.indreshgahoi.queue.metadata.domain.model.QueueLifecycleState;
+import org.springframework.stereotype.Repository;
+
+import javax.sql.DataSource;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.HexFormat;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+
+@Repository
+class PostgresQueueMetadataRepository
+        implements QueueMetadataRepository {
+
+    private static final String OPERATION_CREATE_QUEUE =
+            "CREATE_QUEUE";
+
+    private final DataSource dataSource;
+    private final Clock clock;
+
+    PostgresQueueMetadataRepository(
+            DataSource dataSource,
+            Clock clock
+    ) {
+        this.dataSource = Objects.requireNonNull(
+                dataSource,
+                "dataSource"
+        );
+        this.clock = Objects.requireNonNull(clock, "clock");
+    }
+
+    @Override
+    public QueueDescriptor create(
+            CreateQueueCommand command
+    ) {
+        Objects.requireNonNull(command, "command");
+        String requestHash = requestHash(command);
+
+        return inTransaction(connection -> {
+            boolean reserved = reserveRequest(
+                    connection,
+                    command,
+                    requestHash
+            );
+
+            if (!reserved) {
+                return replayCreate(
+                        connection,
+                        command,
+                        requestHash
+                );
+            }
+
+            QueueDescriptor descriptor =
+                    newDescriptor(command);
+            insertQueue(connection, descriptor);
+            completeRequest(
+                    connection,
+                    command,
+                    descriptor.queueId()
+            );
+            return descriptor;
+        });
+    }
+
+    @Override
+    public Optional<QueueDescriptor> find(
+            String tenantId,
+            String queueName
+    ) {
+        QueueDescriptor.requireText(tenantId, "tenantId");
+        QueueDescriptor.requireText(queueName, "queueName");
+
+        String sql = """
+                SELECT *
+                FROM queues
+                WHERE tenant_id = ?
+                  AND queue_name = ?
+                  AND lifecycle_state <> 'DELETED'
+                """;
+
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, tenantId);
+            statement.setString(2, queueName);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next()
+                        ? Optional.of(map(resultSet))
+                        : Optional.empty();
+            }
+        } catch (SQLException e) {
+            throw databaseFailure("find queue", e);
+        }
+    }
+
+    @Override
+    public List<QueueDescriptor> list(
+            String tenantId
+    ) {
+        QueueDescriptor.requireText(tenantId, "tenantId");
+        String sql = """
+                SELECT *
+                FROM queues
+                WHERE tenant_id = ?
+                  AND lifecycle_state <> 'DELETED'
+                ORDER BY queue_name
+                """;
+
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, tenantId);
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                List<QueueDescriptor> queues = new ArrayList<>();
+                while (resultSet.next()) {
+                    queues.add(map(resultSet));
+                }
+                return List.copyOf(queues);
+            }
+        } catch (SQLException e) {
+            throw databaseFailure("list queues", e);
+        }
+    }
+
+    @Override
+    public QueueDescriptor beginDeletion(
+            String tenantId,
+            String queueName
+    ) {
+        QueueDescriptor.requireText(tenantId, "tenantId");
+        QueueDescriptor.requireText(queueName, "queueName");
+
+        return inTransaction(connection -> {
+            QueueDescriptor current = lockByName(
+                    connection,
+                    tenantId,
+                    queueName
+            ).orElseThrow(() -> new QueueMetadataException(
+                    "Queue does not exist"
+            ));
+
+            if (current.lifecycleState()
+                    == QueueLifecycleState.DELETING) {
+                return current;
+            }
+            if (current.lifecycleState()
+                    != QueueLifecycleState.ACTIVE) {
+                throw new QueueMetadataException(
+                        "Queue cannot be deleted from state "
+                                + current.lifecycleState()
+                );
+            }
+            return updateTransition(
+                    connection,
+                    current,
+                    QueueLifecycleState.DELETING
+            );
+        });
+    }
+
+    @Override
+    public QueueDescriptor transition(
+            UUID queueId,
+            UUID generationId,
+            long expectedVersion,
+            QueueLifecycleState expectedState,
+            QueueLifecycleState nextState
+    ) {
+        Objects.requireNonNull(queueId, "queueId");
+        Objects.requireNonNull(generationId, "generationId");
+        Objects.requireNonNull(expectedState, "expectedState");
+        Objects.requireNonNull(nextState, "nextState");
+        validateTransition(expectedState, nextState);
+
+        return inTransaction(connection -> {
+            String sql = """
+                    UPDATE queues
+                    SET lifecycle_state = ?,
+                        metadata_version = metadata_version + 1,
+                        updated_at = ?
+                    WHERE queue_id = ?
+                      AND generation_id = ?
+                      AND metadata_version = ?
+                      AND lifecycle_state = ?
+                    RETURNING *
+                    """;
+
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setString(1, nextState.name());
+                statement.setTimestamp(
+                        2,
+                        Timestamp.from(now())
+                );
+                statement.setObject(3, queueId);
+                statement.setObject(4, generationId);
+                statement.setLong(5, expectedVersion);
+                statement.setString(6, expectedState.name());
+
+                try (ResultSet resultSet =
+                             statement.executeQuery()) {
+                    if (!resultSet.next()) {
+                        throw new StaleQueueMetadataException();
+                    }
+                    return map(resultSet);
+                }
+            }
+        });
+    }
+
+    private boolean reserveRequest(
+            Connection connection,
+            CreateQueueCommand command,
+            String requestHash
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO metadata_requests (
+                    tenant_id,
+                    idempotency_key,
+                    operation_type,
+                    request_hash,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, command.tenantId());
+            statement.setString(2, command.idempotencyKey());
+            statement.setString(3, OPERATION_CREATE_QUEUE);
+            statement.setString(4, requestHash);
+            statement.setTimestamp(
+                    5,
+                    Timestamp.from(now())
+            );
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    private QueueDescriptor replayCreate(
+            Connection connection,
+            CreateQueueCommand command,
+            String requestHash
+    ) throws SQLException {
+        String sql = """
+                SELECT operation_type, request_hash, response_queue_id
+                FROM metadata_requests
+                WHERE tenant_id = ?
+                  AND idempotency_key = ?
+                FOR UPDATE
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, command.tenantId());
+            statement.setString(2, command.idempotencyKey());
+
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()
+                        || !OPERATION_CREATE_QUEUE.equals(
+                        resultSet.getString("operation_type")
+                )
+                        || !requestHash.equals(
+                        resultSet.getString("request_hash")
+                )) {
+                    throw new IdempotencyConflictException();
+                }
+                UUID queueId = resultSet.getObject(
+                        "response_queue_id",
+                        UUID.class
+                );
+                if (queueId == null) {
+                    throw new QueueMetadataException(
+                            "Idempotent request has no committed response"
+                    );
+                }
+                return findById(connection, queueId)
+                        .orElseThrow(() -> new QueueMetadataException(
+                                "Idempotent response queue is missing"
+                        ));
+            }
+        }
+    }
+
+    private void insertQueue(
+            Connection connection,
+            QueueDescriptor descriptor
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO queues (
+                    queue_id,
+                    tenant_id,
+                    queue_name,
+                    generation_id,
+                    lifecycle_state,
+                    partition_count,
+                    metadata_version,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setObject(1, descriptor.queueId());
+            statement.setString(2, descriptor.tenantId());
+            statement.setString(3, descriptor.queueName());
+            statement.setObject(4, descriptor.generationId());
+            statement.setString(
+                    5,
+                    descriptor.lifecycleState().name()
+            );
+            statement.setInt(6, descriptor.partitionCount());
+            statement.setLong(7, descriptor.metadataVersion());
+            statement.setTimestamp(
+                    8,
+                    Timestamp.from(descriptor.createdAt())
+            );
+            statement.setTimestamp(
+                    9,
+                    Timestamp.from(descriptor.updatedAt())
+            );
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            if ("23505".equals(e.getSQLState())) {
+                throw new QueueAlreadyExistsException(
+                        descriptor.tenantId(),
+                        descriptor.queueName()
+                );
+            }
+            throw e;
+        }
+    }
+
+    private void completeRequest(
+            Connection connection,
+            CreateQueueCommand command,
+            UUID queueId
+    ) throws SQLException {
+        String sql = """
+                UPDATE metadata_requests
+                SET response_queue_id = ?
+                WHERE tenant_id = ?
+                  AND idempotency_key = ?
+                """;
+
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setObject(1, queueId);
+            statement.setString(2, command.tenantId());
+            statement.setString(3, command.idempotencyKey());
+            if (statement.executeUpdate() != 1) {
+                throw new QueueMetadataException(
+                        "Failed to complete idempotent request"
+                );
+            }
+        }
+    }
+
+    private Optional<QueueDescriptor> lockByName(
+            Connection connection,
+            String tenantId,
+            String queueName
+    ) throws SQLException {
+        String sql = """
+                SELECT *
+                FROM queues
+                WHERE tenant_id = ?
+                  AND queue_name = ?
+                  AND lifecycle_state <> 'DELETED'
+                FOR UPDATE
+                """;
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, tenantId);
+            statement.setString(2, queueName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next()
+                        ? Optional.of(map(resultSet))
+                        : Optional.empty();
+            }
+        }
+    }
+
+    private Optional<QueueDescriptor> findById(
+            Connection connection,
+            UUID queueId
+    ) throws SQLException {
+        try (PreparedStatement statement =
+                     connection.prepareStatement(
+                             "SELECT * FROM queues WHERE queue_id = ?"
+                     )) {
+            statement.setObject(1, queueId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next()
+                        ? Optional.of(map(resultSet))
+                        : Optional.empty();
+            }
+        }
+    }
+
+    private QueueDescriptor updateTransition(
+            Connection connection,
+            QueueDescriptor current,
+            QueueLifecycleState nextState
+    ) throws SQLException {
+        String sql = """
+                UPDATE queues
+                SET lifecycle_state = ?,
+                    metadata_version = metadata_version + 1,
+                    updated_at = ?
+                WHERE queue_id = ?
+                  AND generation_id = ?
+                  AND metadata_version = ?
+                RETURNING *
+                """;
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, nextState.name());
+            statement.setTimestamp(
+                    2,
+                    Timestamp.from(now())
+            );
+            statement.setObject(3, current.queueId());
+            statement.setObject(4, current.generationId());
+            statement.setLong(5, current.metadataVersion());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new StaleQueueMetadataException();
+                }
+                return map(resultSet);
+            }
+        }
+    }
+
+    private QueueDescriptor newDescriptor(
+            CreateQueueCommand command
+    ) {
+        Instant now = now();
+        return new QueueDescriptor(
+                command.tenantId(),
+                command.queueName(),
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                1,
+                QueueLifecycleState.PROVISIONING,
+                0,
+                now,
+                now
+        );
+    }
+
+    private void validateTransition(
+            QueueLifecycleState expectedState,
+            QueueLifecycleState nextState
+    ) {
+        boolean allowed = switch (expectedState) {
+            case PROVISIONING ->
+                    nextState == QueueLifecycleState.ACTIVE
+                            || nextState
+                            == QueueLifecycleState.PROVISIONING_FAILED;
+            case PROVISIONING_FAILED ->
+                    nextState == QueueLifecycleState.PROVISIONING;
+            case ACTIVE ->
+                    nextState == QueueLifecycleState.DELETING;
+            case DELETING ->
+                    nextState == QueueLifecycleState.DELETED
+                            || nextState
+                            == QueueLifecycleState.DELETE_FAILED;
+            case DELETE_FAILED ->
+                    nextState == QueueLifecycleState.DELETING;
+            case DELETED -> false;
+        };
+        if (!allowed) {
+            throw new IllegalArgumentException(
+                    "Invalid queue lifecycle transition: "
+                            + expectedState
+                            + " -> "
+                            + nextState
+            );
+        }
+    }
+
+    private Instant now() {
+        return clock.instant()
+                .truncatedTo(ChronoUnit.MICROS);
+    }
+
+    private QueueDescriptor map(
+            ResultSet resultSet
+    ) throws SQLException {
+        return new QueueDescriptor(
+                resultSet.getString("tenant_id"),
+                resultSet.getString("queue_name"),
+                resultSet.getObject("queue_id", UUID.class),
+                resultSet.getObject("generation_id", UUID.class),
+                resultSet.getInt("partition_count"),
+                QueueLifecycleState.valueOf(
+                        resultSet.getString("lifecycle_state")
+                ),
+                resultSet.getLong("metadata_version"),
+                resultSet.getTimestamp("created_at").toInstant(),
+                resultSet.getTimestamp("updated_at").toInstant()
+        );
+    }
+
+    private String requestHash(
+            CreateQueueCommand command
+    ) {
+        try {
+            MessageDigest digest =
+                    MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(
+                    (OPERATION_CREATE_QUEUE
+                            + "\u0000"
+                            + command.queueName())
+                            .getBytes(StandardCharsets.UTF_8)
+            );
+            return HexFormat.of().formatHex(hash);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(
+                    "SHA-256 is required by Java",
+                    e
+            );
+        }
+    }
+
+    private <T> T inTransaction(
+            SqlTransaction<T> transaction
+    ) {
+        try (Connection connection =
+                     dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                T result = transaction.execute(connection);
+                connection.commit();
+                return result;
+            } catch (RuntimeException | SQLException e) {
+                rollback(connection, e);
+                if (e instanceof RuntimeException runtime) {
+                    throw runtime;
+                }
+                throw databaseFailure(
+                        "execute transaction",
+                        (SQLException) e
+                );
+            }
+        } catch (SQLException e) {
+            throw databaseFailure("open transaction", e);
+        }
+    }
+
+    private void rollback(
+            Connection connection,
+            Exception original
+    ) {
+        try {
+            connection.rollback();
+        } catch (SQLException rollbackFailure) {
+            original.addSuppressed(rollbackFailure);
+        }
+    }
+
+    private MetadataUnavailableException databaseFailure(
+            String operation,
+            SQLException cause
+    ) {
+        return new MetadataUnavailableException(
+                "Failed to " + operation,
+                cause
+        );
+    }
+
+    @FunctionalInterface
+    private interface SqlTransaction<T> {
+        T execute(Connection connection)
+                throws SQLException;
+    }
+}

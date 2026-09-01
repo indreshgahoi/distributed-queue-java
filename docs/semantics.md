@@ -2169,3 +2169,71 @@ The file WAL header is version 2 and includes lineage. The snapshot format is
 version 2 and includes lineage in its checksum-protected payload. Earlier
 formats are rejected explicitly; this learning-stage release provides no
 in-place migration.
+
+## v0.18.0 — PostgreSQL-Backed Queue Metadata Service
+
+### G169 — Metadata and message state have separate authorities
+
+PostgreSQL is authoritative for tenant-scoped queue existence, identity, and
+lifecycle. A `LocalMessageQueue` WAL and snapshot remain authoritative for
+messages and delivery state. Metadata transactions do not imply that queue
+storage or any remote side effect committed.
+
+### G170 — Live queue names are tenant scoped
+
+At most one non-`DELETED` descriptor may exist for `(tenantId, queueName)`.
+Different tenants may use the same queue name. Listing and lookup are always
+scoped by tenant.
+
+### G171 — Creation begins in PROVISIONING
+
+Successful metadata creation atomically publishes a new queue ID, generation
+ID, one partition, metadata version zero, and state `PROVISIONING`. It does not
+publish `ACTIVE` before a trusted future provisioner establishes matching
+storage.
+
+### G172 — Create requests are idempotent
+
+An idempotency key is scoped by tenant. The request reservation, queue row, and
+recorded response queue ID commit in one PostgreSQL transaction. A retry of the
+same request returns the same descriptor. Reusing the key for another request
+is rejected.
+
+### G173 — Queue-name uniqueness is independent of idempotency
+
+A different request attempting to create the same live tenant/name is rejected
+even when it uses another idempotency key. The failed transaction must not
+retain a request reservation.
+
+### G174 — Lifecycle transitions are fenced
+
+Internal lifecycle transitions compare queue ID, generation ID, expected
+state, and metadata version. Success increments metadata version exactly once.
+A stale or duplicated transition changes nothing and reports failure.
+
+### G175 — Delete separates logical and physical completion
+
+Customer deletion moves an `ACTIVE` queue to `DELETING`. Repeating that request
+while already `DELETING` returns the same authority. Only a trusted completion
+transition publishes `DELETED`; physical storage cleanup is not claimed by the
+initial delete response.
+
+### G176 — Recreation receives fresh lineage
+
+After deletion completes, the tenant/name may be created again, but both its
+queue ID and generation ID are newly allocated. Old storage cannot match the
+replacement descriptor's lineage.
+
+### G177 — v0.18 remains single-partition metadata
+
+Every descriptor has `partitionCount = 1`, and its only storage lineage uses
+partition ID zero. Metadata identity does not yet assign a node, grant
+ownership, route traffic, or replicate messages.
+
+### G178 — Metadata service is an independent deployable boundary
+
+The durable queue engine and metadata control plane are separate Maven modules.
+The Spring Boot metadata service publishes versioned REST resources, applies
+Flyway migrations before readiness, reports database-aware health, shuts down
+gracefully, and represents API errors as `application/problem+json`. These
+operational mechanisms do not change queue message semantics.

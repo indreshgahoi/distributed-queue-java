@@ -14,15 +14,43 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.16.0 — automatic bounded storage lifecycle.
+Latest release: v0.17.0 — durable storage lineage.
 
-Current development: v0.17.0 — durable storage lineage. Every WAL segment and
-snapshot belongs to one queue ID, storage generation, and partition ID so
-recovery and reclamation reject structurally valid artifacts from another
-storage history.
+Current development: v0.18.0 — PostgreSQL-backed queue metadata service. A
+separate control-plane process owns tenant-scoped queue identity, lifecycle,
+idempotent creation, and optimistic-concurrency fencing.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
+
+The Maven build has two independently packaged modules:
+
+```text
+queue-core        durable local queue engine and storage state machine
+metadata-service Spring Boot control-plane service and PostgreSQL repository
+```
+
+The metadata service keeps its domain authority independent of delivery and
+storage frameworks through explicit ports-and-adapters boundaries:
+
+```text
+metadata
+├── domain
+│   ├── model
+│   └── exception
+├── application
+│   ├── port.in
+│   ├── port.out
+│   └── service
+├── adapter
+│   ├── in.web
+│   └── out.postgres
+└── MetadataServiceApplication   Spring Boot composition root
+```
+
+Domain types and ports are deliberate public contracts. Controllers,
+application-service implementations, persistence implementations, and their
+constructors remain package-private so callers cannot bypass those contracts.
 
 ## Design Principles
 
@@ -61,27 +89,29 @@ distributed system.
    deletion include parent-directory durability boundaries.
 8. **Automatic bounded storage** — durable WAL progress triggers serialized
    checkpoint, promotion, and reclamation cycles with observable retries.
+9. **Durable storage lineage** — WAL segments and snapshots are bound to one
+   queue, generation, and partition identity.
 
 ### Current milestone
 
-**v0.17.0 — Durable storage lineage**
+**v0.18.0 — PostgreSQL-backed queue metadata service**
 
-Bind every WAL segment and snapshot to `(queueId, generationId, partitionId)`.
-Recovery and compaction fail closed when artifacts from different storage
-histories are mixed. This is a storage identity boundary, not yet routing,
-ownership, replication, or a multi-queue control plane.
+Introduce a separate metadata control plane backed by PostgreSQL. It allocates
+tenant-scoped queues in `PROVISIONING`, provides retry-safe creation through
+idempotency keys, and fences lifecycle changes with generation ID and metadata
+version. Queue-node provisioning remains the next distributed workflow.
 
 ### Next decision area
 
-After v0.17.0, the repository will be reviewed again before selecting a
+After v0.18.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,
   and disk consumption under sustained producer load.
 - **Producer idempotency** — resolve duplicate publication when a producer
   retries after an ambiguous response.
-- **Queue namespace and lifecycle metadata** — model multiple customer queues
-  without yet distributing partition ownership.
+- **Queue-node provisioning and reconciliation** — turn `PROVISIONING`
+  descriptors into lineage-matched local storage and recover incomplete work.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
@@ -93,3 +123,185 @@ and quorum durability come only after the local durability and storage
 lifecycle contracts are explicit and tested. These phases will introduce the
 distributed concerns of fencing, partial failure, split brain, replica lag,
 and recovery-source authority rather than merely adding remote APIs.
+
+## Metadata Service
+
+### Run locally with Docker Compose
+
+#### 1. Prerequisites
+
+- Docker Engine or Docker Desktop;
+- Docker Compose v2 (`docker compose version`);
+- ports `5432` and `8080` available locally.
+
+All commands below run from the repository root.
+
+#### 2. Start PostgreSQL and the service
+
+Build the Java 21 service image and start both containers in the background:
+
+```bash
+docker compose up --detach --build
+```
+
+Compose waits for PostgreSQL to become healthy before starting the service.
+Flyway creates or upgrades the metadata schema during application startup.
+
+Follow startup logs with:
+
+```bash
+docker compose logs --follow metadata-service
+```
+
+The service is ready after the log contains
+`Started MetadataServiceApplication`.
+
+#### 3. Verify readiness
+
+Check container state:
+
+```bash
+docker compose ps
+```
+
+`postgres` should report `healthy`, and `metadata-service` should report `Up`.
+Then verify the application health endpoint:
+
+```bash
+curl --fail http://localhost:8080/actuator/health
+```
+
+The response should contain `"status":"UP"`.
+
+#### 4. Test through Swagger UI
+
+Open the interactive API at:
+
+```text
+http://localhost:8080/swagger-ui.html
+```
+
+The raw OpenAPI document is available at:
+
+```text
+http://localhost:8080/v3/api-docs
+```
+
+Swagger UI contains example tenant IDs, queue names, idempotency keys, request
+bodies, and responses. Select an operation, choose **Try it out**, keep or edit
+the example values, and execute the request against the local service.
+
+Recommended first request:
+
+1. Select `POST /api/v1/tenants/{tenantId}/queues`.
+2. Choose **Try it out**.
+3. Use tenant ID `acme`.
+4. Use idempotency key `create-orders-001`.
+5. Keep the example body `{"queueName":"orders"}`.
+6. Execute the request and expect `201 Created`.
+
+The new descriptor is deliberately returned in `PROVISIONING`. The current
+customer API cannot promote it to `ACTIVE`; that transition is reserved for a
+future trusted provisioner. Consequently, attempting to delete this newly
+created queue currently returns a lifecycle conflict by design.
+
+#### 5. Test from the command line
+
+Create a queue:
+
+```bash
+curl --request POST \
+  http://localhost:8080/api/v1/tenants/acme/queues \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: create-orders-001' \
+  --data '{"queueName":"orders"}'
+```
+
+Read it back with:
+
+```bash
+curl http://localhost:8080/api/v1/tenants/acme/queues/orders
+```
+
+List all queues in the tenant:
+
+```bash
+curl http://localhost:8080/api/v1/tenants/acme/queues
+```
+
+Repeat the create request with the same idempotency key and body to verify
+retry safety: it returns the same queue identity rather than creating another
+queue.
+
+#### 6. Stop or reset the environment
+
+Stop containers while preserving PostgreSQL data:
+
+```bash
+docker compose down
+```
+
+To also remove the local PostgreSQL volume and start with an empty database:
+
+```bash
+docker compose down --volumes
+```
+
+#### Troubleshooting: `UnknownHostException: postgres`
+
+If startup fails with `UnknownHostException: postgres`, the containers are no
+longer attached to a healthy Compose network. Recreate the containers and
+network without deleting the PostgreSQL volume:
+
+```bash
+docker compose down
+docker compose up --detach --build
+docker compose ps
+```
+
+Both services should report `Up`, and PostgreSQL should report `healthy`. Do
+not add `--volumes` when recovering the network unless discarding local
+metadata is intentional.
+
+If `docker compose` is unavailable but `docker-compose version` succeeds, use
+`docker-compose` in place of `docker compose` in the commands above.
+
+### Run the service from Maven
+
+To run Java on the host while PostgreSQL remains in Docker, start only the
+database:
+
+```bash
+docker compose up --detach postgres
+mvn -pl metadata-service -am install -DskipTests
+mvn -pl metadata-service spring-boot:run
+```
+
+The metadata service reads these environment variables when their defaults are
+not suitable:
+
+```text
+METADATA_DATABASE_URL=jdbc:postgresql://localhost:5432/queue_metadata
+METADATA_DATABASE_USER=queue
+METADATA_DATABASE_PASSWORD=queue
+METADATA_HTTP_PORT=8080
+```
+
+Flyway applies versioned schema migrations before the service becomes ready.
+The REST resources are:
+
+```text
+POST   /api/v1/tenants/{tenantId}/queues
+GET    /api/v1/tenants/{tenantId}/queues/{queueName}
+GET    /api/v1/tenants/{tenantId}/queues
+DELETE /api/v1/tenants/{tenantId}/queues/{queueName}
+GET    /actuator/health
+```
+
+`POST` requires an `Idempotency-Key` header and a JSON body such as
+`{"queueName":"orders"}`. It returns `201 Created`, a resource `Location`,
+and a `PROVISIONING` descriptor. Validation and domain failures use standard
+`application/problem+json` responses. Only a future trusted provisioner may
+transition the descriptor to `ACTIVE`.
+PostgreSQL integration tests use an ephemeral Testcontainers database and are
+skipped when Docker is unavailable.
