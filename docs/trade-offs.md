@@ -524,3 +524,33 @@ initial checkpoint policy.
 - asynchronous snapshot serialization from an immutable state view;
 - metrics and external health endpoints;
 - distributed maintenance ownership.
+
+## v0.17.0 — Embed Storage Lineage in WAL and Snapshots
+
+### Decision
+
+Persist `(queueId, generationId, partitionId)` in every WAL segment and
+snapshot, and require exact equality across recovery and compaction authority
+transitions. Reject pre-lineage formats instead of adding migration machinery.
+
+### Gain
+
+- prevents valid but unrelated artifacts from being combined during restore;
+- prevents a foreign snapshot from authorizing deletion of local WAL history;
+- makes queue generation and partition identity explicit before ownership and
+  replication are introduced;
+- creates a reusable fencing dimension for later placement epochs.
+
+### Cost
+
+- WAL and snapshot formats advance to version 2;
+- existing v1 storage cannot be opened by this release;
+- UUID metadata increases each WAL segment header and snapshot payload;
+- correct backup/restore must preserve the complete lineage tuple.
+
+### Deferred
+
+- migration from v1 artifacts;
+- queue namespace and customer tenancy metadata;
+- partition routing and ownership epochs;
+- replicated generation creation and consensus-backed metadata.

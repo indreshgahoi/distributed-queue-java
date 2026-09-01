@@ -589,6 +589,7 @@ public final class LocalMessageQueue
                             .toList();
 
             return new QueueSnapshot(
+                    wal.storageLineage(),
                     position,
                     readySnapshot,
                     inFlightSnapshot,
@@ -612,6 +613,10 @@ public final class LocalMessageQueue
             if (snapshot.isPresent()) {
                 QueueSnapshot queueSnapshot =
                         snapshot.get();
+
+                validateSnapshotLineage(
+                        queueSnapshot
+                );
 
                 /*
                  * Establish snapshot as the recovery baseline.
@@ -896,6 +901,17 @@ public final class LocalMessageQueue
                             null,
                             null
                     )
+            );
+        }
+    }
+
+    private void validateSnapshotLineage(
+            QueueSnapshot snapshot
+    ) {
+        if (!wal.storageLineage()
+                .equals(snapshot.storageLineage())) {
+            throw new SnapshotException(
+                    "Snapshot lineage does not match WAL lineage"
             );
         }
     }

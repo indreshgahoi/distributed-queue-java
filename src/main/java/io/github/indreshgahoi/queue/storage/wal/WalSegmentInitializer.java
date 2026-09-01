@@ -1,5 +1,7 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.StorageLineage;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -8,15 +10,22 @@ import java.nio.file.StandardOpenOption;
 
 final class WalSegmentInitializer {
 
-    private static final int WAL_MAGIC =
-            0x4451574C; // DQWL
-
-    private static final int WAL_VERSION =
-            1;
-
     static final int WAL_HEADER_SIZE =
-            Integer.BYTES
-                    + Integer.BYTES;
+            WalHeaderCodec.HEADER_SIZE;
+
+    private final StorageLineage storageLineage;
+    private final WalHeaderCodec headerCodec;
+
+    WalSegmentInitializer() {
+        this(StorageLineage.create());
+    }
+
+    WalSegmentInitializer(
+            StorageLineage storageLineage
+    ) {
+        this.storageLineage = storageLineage;
+        this.headerCodec = new WalHeaderCodec();
+    }
 
     void initialize(
             Path path
@@ -29,13 +38,9 @@ final class WalSegmentInitializer {
                      )) {
 
             ByteBuffer header =
-                    ByteBuffer.allocate(
-                            WAL_HEADER_SIZE
+                    headerCodec.encode(
+                            storageLineage
                     );
-
-            header.putInt(WAL_MAGIC);
-            header.putInt(WAL_VERSION);
-            header.flip();
 
             while (header.hasRemaining()) {
                 channel.write(header);
@@ -74,50 +79,44 @@ final class WalSegmentInitializer {
                 );
             }
 
-            ByteBuffer header =
-                    ByteBuffer.allocate(
-                            WAL_HEADER_SIZE
+            StorageLineage actual =
+                    headerCodec.read(
+                            channel,
+                            "WAL segment"
                     );
 
-            while (header.hasRemaining()) {
-                int read =
-                        channel.read(header);
-
-                if (read == -1) {
-                    throw new WalException(
-                            "Incomplete WAL segment header: "
-                                    + path
-                    );
-                }
-            }
-
-            header.flip();
-
-            int magic =
-                    header.getInt();
-
-            int version =
-                    header.getInt();
-
-            if (magic != WAL_MAGIC) {
+            if (!storageLineage.equals(actual)) {
                 throw new WalException(
-                        "Invalid WAL segment magic: "
-                                + path
-                );
-            }
-
-            if (version != WAL_VERSION) {
-                throw new WalException(
-                        "Unsupported WAL segment version "
-                                + version
-                                + ": "
-                                + path
+                        "WAL segment lineage mismatch. Expected "
+                                + storageLineage
+                                + " but found "
+                                + actual
                 );
             }
 
         } catch (IOException e) {
             throw new WalException(
                     "Failed to validate WAL segment: "
+                            + path,
+                    e
+            );
+        }
+    }
+
+    static StorageLineage readLineage(
+            Path path
+    ) {
+        try (FileChannel channel =
+                     FileChannel.open(
+                             path,
+                             StandardOpenOption.READ
+                     )) {
+            return new WalHeaderCodec()
+                    .read(channel, "WAL segment");
+
+        } catch (IOException e) {
+            throw new WalException(
+                    "Failed to read WAL segment lineage: "
                             + path,
                     e
             );

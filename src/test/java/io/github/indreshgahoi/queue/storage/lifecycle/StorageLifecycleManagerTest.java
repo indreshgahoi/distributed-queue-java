@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.lifecycle;
 
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 import io.github.indreshgahoi.queue.storage.compaction.SnapshotCompactionCoordinator;
 import io.github.indreshgahoi.queue.storage.compaction.WalCompactionBoundaryTracker;
@@ -23,6 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StorageLifecycleManagerTest {
 
+    private static final StorageLineage LINEAGE =
+            StorageLineage.create();
+
     @Test
     void startedManagerRunsMaintenanceAutomatically()
             throws InterruptedException {
@@ -35,6 +39,7 @@ class StorageLifecycleManagerTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         new WalCompactionBoundaryTracker(),
+                        LINEAGE,
                         position -> { },
                         position -> checkpointCommitted.countDown()
                 );
@@ -223,6 +228,7 @@ class StorageLifecycleManagerTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         new WalCompactionBoundaryTracker(),
+                        LINEAGE,
                         position -> { },
                         compactor
                 );
@@ -240,6 +246,7 @@ class StorageLifecycleManagerTest {
             WalPosition position
     ) {
         return new QueueSnapshot(
+                LINEAGE,
                 position,
                 List.of(),
                 List.of(),

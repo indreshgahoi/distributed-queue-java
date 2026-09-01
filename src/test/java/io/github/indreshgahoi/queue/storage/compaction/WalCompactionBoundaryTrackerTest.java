@@ -1,6 +1,7 @@
 package io.github.indreshgahoi.queue.storage.compaction;
 
 import io.github.indreshgahoi.queue.storage.WalPosition;
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshot;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshotStore;
 import io.github.indreshgahoi.queue.storage.snapshot.SnapshotException;
@@ -274,6 +275,7 @@ class WalCompactionBoundaryTrackerTest {
             WalPosition position
     ) {
         return new QueueSnapshot(
+                StorageLineage.create(),
                 position,
                 List.of(),
                 List.of(),

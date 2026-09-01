@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 
 import java.io.IOException;
@@ -14,18 +15,15 @@ import java.util.Objects;
 public final class FileWriteAheadLog
         implements WriteAheadLog {
 
-    private static final int WAL_MAGIC =
-            0x4451574C; // "DQWL"
-
-    private static final int WAL_VERSION = 1;
-
     private static final int WAL_HEADER_SIZE =
-            Integer.BYTES + Integer.BYTES;
+            WalHeaderCodec.HEADER_SIZE;
 
     private final Path path;
     private final WalFrameCodec frameCodec;
     private final FileChannel appendChannel;
     private final FrameAppender frameAppender;
+    private final WalHeaderCodec headerCodec;
+    private final StorageLineage storageLineage;
 
     /*
      * If append fails, the current frame may have been
@@ -38,6 +36,21 @@ public final class FileWriteAheadLog
     public FileWriteAheadLog(Path path) {
         this(
                 path,
+                null,
+                FileWriteAheadLog::writeAndForceFrame
+        );
+    }
+
+    public FileWriteAheadLog(
+            Path path,
+            StorageLineage storageLineage
+    ) {
+        this(
+                path,
+                Objects.requireNonNull(
+                        storageLineage,
+                        "storageLineage"
+                ),
                 FileWriteAheadLog::writeAndForceFrame
         );
     }
@@ -48,6 +61,18 @@ public final class FileWriteAheadLog
      */
     FileWriteAheadLog(
             Path path,
+            FrameAppender frameAppender
+    ) {
+        this(
+                path,
+                null,
+                frameAppender
+        );
+    }
+
+    private FileWriteAheadLog(
+            Path path,
+            StorageLineage configuredLineage,
             FrameAppender frameAppender
     ) {
         this.path =
@@ -63,6 +88,7 @@ public final class FileWriteAheadLog
                 );
 
         this.frameCodec = new WalFrameCodec();
+        this.headerCodec = new WalHeaderCodec();
 
         try {
             this.appendChannel =
@@ -73,7 +99,10 @@ public final class FileWriteAheadLog
                             StandardOpenOption.APPEND
                     );
 
-            initializeOrValidateHeader();
+            this.storageLineage =
+                    initializeOrValidateHeader(
+                            configuredLineage
+                    );
 
         } catch (IOException e) {
             throw new WalException(
@@ -194,6 +223,11 @@ public final class FileWriteAheadLog
     }
 
     @Override
+    public StorageLineage storageLineage() {
+        return storageLineage;
+    }
+
+    @Override
     public synchronized void close() {
         if (closed) {
             return;
@@ -212,14 +246,31 @@ public final class FileWriteAheadLog
         }
     }
 
-    private void initializeOrValidateHeader() {
+    private StorageLineage initializeOrValidateHeader(
+            StorageLineage configuredLineage
+    ) {
         try {
             if (appendChannel.size() == 0) {
-                writeHeader();
-                return;
+                StorageLineage created =
+                        configuredLineage == null
+                                ? StorageLineage.create()
+                                : configuredLineage;
+
+                writeHeader(created);
+                return created;
             }
 
-            validateHeader();
+            StorageLineage persisted =
+                    readHeader();
+
+            if (configuredLineage != null
+                    && !configuredLineage.equals(persisted)) {
+                throw new WalException(
+                        "Configured storage lineage does not match WAL lineage"
+                );
+            }
+
+            return persisted;
 
         } catch (IOException e) {
             throw new WalException(
@@ -229,15 +280,11 @@ public final class FileWriteAheadLog
         }
     }
 
-    private void writeHeader() throws IOException {
+    private void writeHeader(
+            StorageLineage lineage
+    ) throws IOException {
         ByteBuffer header =
-                ByteBuffer.allocate(
-                        WAL_HEADER_SIZE
-                );
-
-        header.putInt(WAL_MAGIC);
-        header.putInt(WAL_VERSION);
-        header.flip();
+                headerCodec.encode(lineage);
 
         writeFully(
                 appendChannel,
@@ -247,41 +294,17 @@ public final class FileWriteAheadLog
         appendChannel.force(true);
     }
 
-    private void validateHeader() throws IOException {
+    private StorageLineage readHeader() throws IOException {
         try (FileChannel channel =
                      FileChannel.open(
                              path,
                              StandardOpenOption.READ
                      )) {
 
-            ByteBuffer header =
-                    ByteBuffer.allocate(
-                            WAL_HEADER_SIZE
-                    );
-
-            if (!readFully(channel, header)) {
-                throw new WalException(
-                        "Incomplete WAL header"
-                );
-            }
-
-            header.flip();
-
-            int magic = header.getInt();
-            int version = header.getInt();
-
-            if (magic != WAL_MAGIC) {
-                throw new WalException(
-                        "Invalid WAL magic"
-                );
-            }
-
-            if (version != WAL_VERSION) {
-                throw new WalException(
-                        "Unsupported WAL version: "
-                                + version
-                );
-            }
+            return headerCodec.read(
+                    channel,
+                    "WAL"
+            );
         }
     }
 

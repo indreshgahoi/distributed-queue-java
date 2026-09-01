@@ -14,11 +14,12 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.15.0 — durable filesystem authority transitions.
+Latest release: v0.16.0 — automatic bounded storage lifecycle.
 
-Current development: v0.16.0 — automatic bounded storage lifecycle. Durable
-WAL segment progress triggers serialized snapshot and reclamation cycles, with
-failure observation and retry semantics separated from queue operations.
+Current development: v0.17.0 — durable storage lineage. Every WAL segment and
+snapshot belongs to one queue ID, storage generation, and partition ID so
+recovery and reclamation reject structurally valid artifacts from another
+storage history.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
@@ -58,27 +59,29 @@ distributed system.
    monotonic across restart.
 7. **Durable filesystem authority** — snapshot/WAL publication and segment
    deletion include parent-directory durability boundaries.
+8. **Automatic bounded storage** — durable WAL progress triggers serialized
+   checkpoint, promotion, and reclamation cycles with observable retries.
 
 ### Current milestone
 
-**v0.16.0 — Automatic bounded storage lifecycle**
+**v0.17.0 — Durable storage lineage**
 
-Trigger serialized snapshot and reclamation cycles from durable WAL segment
-progress so storage history does not grow indefinitely when callers forget to
-coordinate maintenance manually.
+Bind every WAL segment and snapshot to `(queueId, generationId, partitionId)`.
+Recovery and compaction fail closed when artifacts from different storage
+histories are mixed. This is a storage identity boundary, not yet routing,
+ownership, replication, or a multi-queue control plane.
 
 ### Next decision area
 
-After v0.16.0, the repository will be reviewed again before selecting a
+After v0.17.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
-- **Storage lineage identity** — detect snapshots and WAL segments copied from
-  different queue generations instead of accepting structurally compatible
-  but unrelated recovery artifacts.
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,
   and disk consumption under sustained producer load.
 - **Producer idempotency** — resolve duplicate publication when a producer
   retries after an ambiguous response.
+- **Queue namespace and lifecycle metadata** — model multiple customer queues
+  without yet distributing partition ownership.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.

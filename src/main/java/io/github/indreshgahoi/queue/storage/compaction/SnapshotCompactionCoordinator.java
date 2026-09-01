@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.compaction;
 
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshot;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshotStore;
@@ -13,15 +14,18 @@ public final class SnapshotCompactionCoordinator {
     private final WalCompactionBoundaryTracker boundaryTracker;
     private final WalCompactor walCompactor;
     private final SnapshotPositionValidator positionValidator;
+    private final StorageLineage storageLineage;
 
     public SnapshotCompactionCoordinator(
             QueueSnapshotStore snapshotStore,
             WalCompactionBoundaryTracker boundaryTracker,
+            StorageLineage storageLineage,
             SnapshotPositionValidator positionValidator
     ) {
         this(
                 snapshotStore,
                 boundaryTracker,
+                storageLineage,
                 positionValidator,
                 new NoOpWalCompactor()
         );
@@ -30,6 +34,7 @@ public final class SnapshotCompactionCoordinator {
     public SnapshotCompactionCoordinator(
             QueueSnapshotStore snapshotStore,
             WalCompactionBoundaryTracker boundaryTracker,
+            StorageLineage storageLineage,
             SnapshotPositionValidator positionValidator,
             WalCompactor walCompactor
     ) {
@@ -49,6 +54,11 @@ public final class SnapshotCompactionCoordinator {
                         walCompactor,
                         "walCompactor"
                 );
+        this.storageLineage =
+                Objects.requireNonNull(
+                        storageLineage,
+                        "storageLineage"
+                );
 
         this.positionValidator =
                 Objects.requireNonNull(
@@ -66,6 +76,8 @@ public final class SnapshotCompactionCoordinator {
                 snapshot,
                 "snapshot"
         );
+
+        validateLineage(snapshot);
 
         WalPosition candidate =
                 snapshot.walPosition();
@@ -120,6 +132,8 @@ public final class SnapshotCompactionCoordinator {
                 latest.orElseThrow()
                         .walPosition();
 
+        validateLineage(latest.orElseThrow());
+
         positionValidator.validate(
                 position
         );
@@ -148,6 +162,8 @@ public final class SnapshotCompactionCoordinator {
     private void initializeBoundary(
             QueueSnapshot snapshot
     ) {
+        validateLineage(snapshot);
+
         WalPosition position =
                 snapshot.walPosition();
 
@@ -158,6 +174,19 @@ public final class SnapshotCompactionCoordinator {
         boundaryTracker.advanceTo(
                 position
         );
+    }
+
+    private void validateLineage(
+            QueueSnapshot snapshot
+    ) {
+        if (!storageLineage.equals(snapshot.storageLineage())) {
+            throw new IllegalArgumentException(
+                    "Snapshot lineage mismatch. Expected "
+                            + storageLineage
+                            + " but found "
+                            + snapshot.storageLineage()
+            );
+        }
     }
 
     private void compactValidatedPosition(

@@ -1,6 +1,6 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
-
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 
 import java.util.List;
@@ -14,6 +14,12 @@ public interface WriteAheadLog extends AutoCloseable {
     WalPosition currentDurablePosition();
 
     List<WalRecord> readFrom(WalPosition position);
+
+    default StorageLineage storageLineage() {
+        throw new UnsupportedOperationException(
+                "WriteAheadLog implementation must provide storage lineage"
+        );
+    }
 
     /**
      * Returns whether this WAL still contains history from the queue's

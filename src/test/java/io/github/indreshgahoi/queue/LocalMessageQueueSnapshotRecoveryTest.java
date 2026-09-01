@@ -716,7 +716,7 @@ class LocalMessageQueueSnapshotRecoveryTest {
         try (WriteAheadLog wal =
                      new SegmentedFileWriteAheadLog(
                              walDirectory,
-                             9
+                             45
                      )) {
             assertThrows(
                     SnapshotException.class,
@@ -743,7 +743,7 @@ class LocalMessageQueueSnapshotRecoveryTest {
         try (WriteAheadLog wal =
                      new SegmentedFileWriteAheadLog(
                              walDirectory,
-                             9
+                             45
                      );
              LocalMessageQueue recovered =
                      new LocalMessageQueue(
@@ -787,7 +787,7 @@ class LocalMessageQueueSnapshotRecoveryTest {
         try (WriteAheadLog wal =
                      new SegmentedFileWriteAheadLog(
                              walDirectory,
-                             9
+                             45
                      )) {
             assertThrows(
                     SnapshotException.class,
@@ -839,6 +839,40 @@ class LocalMessageQueueSnapshotRecoveryTest {
                             .orElseThrow()
                             .message()
                             .payload()
+            );
+        }
+    }
+
+    @Test
+    void foreignSnapshotIsRejectedEvenWhenWalHistoryIsComplete() {
+        Path sourceWal = tempDir.resolve("source.wal");
+        Path targetWal = tempDir.resolve("target.wal");
+        Path snapshotPath = tempDir.resolve("queue.snapshot");
+        MutableClock clock =
+                clockAt("2026-08-23T10:00:00Z");
+
+        try (LocalMessageQueue source =
+                     createQueue(
+                             sourceWal,
+                             snapshotPath,
+                             clock,
+                             new QueueConfiguration()
+                     )) {
+            source.publish("belongs-to-source");
+            snapshotStore(snapshotPath)
+                    .save(source.captureSnapshot());
+        }
+
+        try (WriteAheadLog target =
+                     new FileWriteAheadLog(targetWal)) {
+            assertThrows(
+                    SnapshotException.class,
+                    () -> new LocalMessageQueue(
+                            clock,
+                            new QueueConfiguration(),
+                            target,
+                            snapshotStore(snapshotPath)
+                    )
             );
         }
     }
@@ -1023,7 +1057,7 @@ class LocalMessageQueueSnapshotRecoveryTest {
         try (WriteAheadLog wal =
                      new SegmentedFileWriteAheadLog(
                              walDirectory,
-                             9
+                             45
                      );
              LocalMessageQueue queue =
                      new LocalMessageQueue(

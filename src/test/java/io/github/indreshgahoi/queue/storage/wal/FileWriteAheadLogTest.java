@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -19,10 +20,46 @@ import static org.junit.jupiter.api.Assertions.*;
 class FileWriteAheadLogTest {
 
     private static final int WAL_HEADER_SIZE =
-            Integer.BYTES * 2;
+            WalHeaderCodec.HEADER_SIZE;
 
     @TempDir
     Path tempDir;
+
+    @Test
+    void storageLineageSurvivesReopen() {
+        Path walPath = tempDir.resolve("queue.wal");
+        StorageLineage expected = StorageLineage.create();
+
+        try (WriteAheadLog wal =
+                     new FileWriteAheadLog(walPath, expected)) {
+            assertEquals(expected, wal.storageLineage());
+        }
+
+        try (WriteAheadLog reopened =
+                     new FileWriteAheadLog(walPath)) {
+            assertEquals(expected, reopened.storageLineage());
+        }
+    }
+
+    @Test
+    void configuredLineageMismatchIsRejected() {
+        Path walPath = tempDir.resolve("queue.wal");
+
+        try (WriteAheadLog ignored =
+                     new FileWriteAheadLog(
+                             walPath,
+                             StorageLineage.create()
+                     )) {
+        }
+
+        assertThrows(
+                WalException.class,
+                () -> new FileWriteAheadLog(
+                        walPath,
+                        StorageLineage.create()
+                )
+        );
+    }
 
     @Test
     void appendedRecordCanBeReadBack() {
@@ -292,17 +329,13 @@ class FileWriteAheadLogTest {
         assertTrue(
                 buffer.remaining() >= Integer.BYTES
         );
-        buffer.getInt(); // magic
-        assertTrue(
-                buffer.remaining() >= Integer.BYTES
-        );
-        buffer.getInt(); // version
+        buffer.position(WAL_HEADER_SIZE);
 
         int declaredLength =
                 buffer.getInt();
 
         int actualPayloadLength =
-                fileBytes.length - Integer.BYTES - Integer.BYTES - Integer.BYTES - Integer.BYTES;
+                fileBytes.length - WAL_HEADER_SIZE - Integer.BYTES - Integer.BYTES;
 
         assertEquals(
                 actualPayloadLength,
@@ -340,11 +373,7 @@ class FileWriteAheadLogTest {
         assertTrue(
                 buffer.remaining() >= Integer.BYTES
         );
-        buffer.getInt(); // magic
-        assertTrue(
-                buffer.remaining() >= Integer.BYTES
-        );
-        buffer.getInt(); // version
+        buffer.position(WAL_HEADER_SIZE);
 
         /*
          * Frame 1
@@ -1066,7 +1095,7 @@ class FileWriteAheadLogTest {
                              StandardOpenOption.READ,
                              StandardOpenOption.WRITE
                      )) {
-            int walOffset = Integer.BYTES * 2;
+            int walOffset = WAL_HEADER_SIZE;
             channel.position(walOffset);
 
             ByteBuffer lengthBuffer =
@@ -1348,7 +1377,7 @@ class FileWriteAheadLogTest {
         );
 
         assertEquals(
-                1,
+                2,
                 buffer.getInt()
         );
     }
@@ -1497,7 +1526,7 @@ class FileWriteAheadLogTest {
          * total   = 8 bytes
          */
         assertEquals(
-                Integer.BYTES * 2,
+                WAL_HEADER_SIZE,
                 sizeAfterFirstOpen
         );
 
@@ -1608,7 +1637,7 @@ class FileWriteAheadLogTest {
             WalPosition recordAreaStart =
                     new WalPosition(
                             0,
-                            Integer.BYTES * 2L
+                            WAL_HEADER_SIZE
                     );
 
             assertEquals(
@@ -1799,7 +1828,7 @@ class FileWriteAheadLogTest {
             WalPosition unsupported =
                     new WalPosition(
                             1,
-                            Integer.BYTES * 2L
+                            WAL_HEADER_SIZE
                     );
 
             WalException exception =
@@ -1912,7 +1941,7 @@ class FileWriteAheadLogTest {
             WalPosition middleOfFrame =
                     new WalPosition(
                             0,
-                            Integer.BYTES * 2L + 1
+                            WAL_HEADER_SIZE + 1L
                     );
 
             assertThrows(

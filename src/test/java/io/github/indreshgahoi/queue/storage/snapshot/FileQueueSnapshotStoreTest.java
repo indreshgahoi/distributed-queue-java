@@ -1,6 +1,7 @@
 package io.github.indreshgahoi.queue.storage.snapshot;
 
 import io.github.indreshgahoi.queue.storage.WalPosition;
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -17,6 +18,9 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.*;
 
 class FileQueueSnapshotStoreTest {
+
+    private static final StorageLineage LINEAGE =
+            StorageLineage.create();
 
     @TempDir
     Path tempDir;
@@ -191,6 +195,7 @@ class FileQueueSnapshotStoreTest {
 
         QueueSnapshot snapshot =
                 new QueueSnapshot(
+                        LINEAGE,
                         new WalPosition(0, 100),
                         List.of(
                                 new ReadySnapshotEntry(
@@ -238,6 +243,7 @@ class FileQueueSnapshotStoreTest {
 
         QueueSnapshot snapshot =
                 new QueueSnapshot(
+                        LINEAGE,
                         new WalPosition(0, 200),
                         List.of(),
                         List.of(
@@ -299,6 +305,7 @@ class FileQueueSnapshotStoreTest {
 
         QueueSnapshot snapshot =
                 new QueueSnapshot(
+                        LINEAGE,
                         new WalPosition(0, 300),
                         List.of(),
                         List.of(),
@@ -344,6 +351,7 @@ class FileQueueSnapshotStoreTest {
 
         QueueSnapshot snapshot =
                 new QueueSnapshot(
+                        LINEAGE,
                         new WalPosition(0, 400),
                         List.of(),
                         List.of(),
@@ -378,6 +386,7 @@ class FileQueueSnapshotStoreTest {
 
         QueueSnapshot first =
                 new QueueSnapshot(
+                        LINEAGE,
                         new WalPosition(0, 100),
                         List.of(
                                 new ReadySnapshotEntry(
@@ -393,6 +402,7 @@ class FileQueueSnapshotStoreTest {
 
         QueueSnapshot second =
                 new QueueSnapshot(
+                        LINEAGE,
                         new WalPosition(0, 200),
                         List.of(
                                 new ReadySnapshotEntry(
@@ -1221,6 +1231,7 @@ class FileQueueSnapshotStoreTest {
             WalPosition position
     ) {
         return new QueueSnapshot(
+                LINEAGE,
                 position,
                 List.of(
                         new ReadySnapshotEntry(
@@ -1264,6 +1275,7 @@ class FileQueueSnapshotStoreTest {
             String payload
     ) {
         return new QueueSnapshot(
+                LINEAGE,
                 position,
                 List.of(
                         new ReadySnapshotEntry(

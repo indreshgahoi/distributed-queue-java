@@ -2128,3 +2128,44 @@ With successful periodic maintenance, a threshold of N segments triggers a
 checkpoint after the active segment advances N IDs beyond the latest snapshot
 segment. The threshold is not a hard byte bound because a complete WAL frame
 may exceed the configured segment target.
+
+## v0.17.0 — Durable Storage Lineage
+
+### G163 — Durable artifacts identify one storage lineage
+
+Every file-backed WAL and snapshot carries the tuple
+`(queueId, generationId, partitionId)`. The queue ID identifies the logical
+queue, the generation ID fences an independently created storage history for
+that queue, and the partition ID identifies the future partition boundary.
+
+### G164 — One segmented WAL has one lineage
+
+The first segment establishes the WAL lineage. Every later segment must carry
+the same tuple. Startup fails before replay if any authoritative segment has a
+different lineage.
+
+### G165 — Reopen preserves identity
+
+Opening existing WAL storage without a configured lineage adopts the persisted
+lineage. Opening it with an expected lineage succeeds only when the complete
+tuple matches. New empty storage generates a lineage unless one is supplied.
+
+### G166 — Snapshot recovery requires lineage equality
+
+A snapshot may seed recovery only when its lineage exactly matches the WAL
+lineage. A mismatch is an authority violation, not snapshot corruption and not
+an optional optimization failure; recovery fails even when complete WAL
+history is available.
+
+### G167 — Foreign snapshots cannot authorize reclamation
+
+The snapshot compaction coordinator is configured with the WAL lineage. It
+must reject a candidate or previously authoritative snapshot with another
+lineage before promotion, boundary advancement, or segment deletion.
+
+### G168 — Storage formats advance without migration
+
+The file WAL header is version 2 and includes lineage. The snapshot format is
+version 2 and includes lineage in its checksum-protected payload. Earlier
+formats are rejected explicitly; this learning-stage release provides no
+in-place migration.

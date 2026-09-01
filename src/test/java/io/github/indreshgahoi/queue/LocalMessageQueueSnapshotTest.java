@@ -1,6 +1,7 @@
 package io.github.indreshgahoi.queue;
 
 import io.github.indreshgahoi.queue.storage.WalPosition;
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.snapshot.DeadLetterSnapshotEntry;
 import io.github.indreshgahoi.queue.storage.snapshot.DelayedSnapshotEntry;
 import io.github.indreshgahoi.queue.storage.snapshot.InFlightSnapshotEntry;
@@ -687,6 +688,11 @@ class LocalMessageQueueSnapshotTest {
         @Override
         public WalPosition currentDurablePosition() {
             return position;
+        }
+
+        @Override
+        public StorageLineage storageLineage() {
+            return StorageLineage.create();
         }
 
         @Override

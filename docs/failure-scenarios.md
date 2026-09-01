@@ -1084,3 +1084,38 @@ Required behavior:
 
     serialize both paths through one lifecycle state machine
     never run overlapping snapshot commits or reclamation passes
+
+## F49 — Snapshot Copied from Another Queue Generation
+
+A valid snapshot file is copied beside a WAL from another queue or from an
+older deleted-and-recreated generation. Its position may coincidentally be a
+valid frame boundary.
+
+Required behavior:
+
+    compare the complete storage lineage before restoring state
+    fail recovery on mismatch
+    never fall back by treating the mismatch as ordinary corruption
+
+## F50 — Foreign Segment Appears in a WAL Directory
+
+An operator, restore process, or partial deployment mixes a valid segment from
+another storage lineage into the authoritative segment sequence.
+
+Required behavior:
+
+    validate every segment header during startup
+    reject the directory before replay or append
+    do not repair, rename, or silently ignore the foreign segment
+
+## F51 — Foreign Snapshot Presented to Compaction
+
+A structurally valid snapshot from another lineage references a plausible WAL
+position. Position-only validation would allow it to advance the compaction
+boundary and delete the real recovery history.
+
+Required behavior:
+
+    validate lineage before snapshot promotion
+    preserve the prior snapshot and boundary on mismatch
+    perform no WAL deletion

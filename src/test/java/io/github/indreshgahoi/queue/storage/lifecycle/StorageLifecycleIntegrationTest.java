@@ -42,7 +42,7 @@ class StorageLifecycleIntegrationTest {
         try (SegmentedFileWriteAheadLog wal =
                      new SegmentedFileWriteAheadLog(
                              walDirectory,
-                             9
+                             45
                      );
              LocalMessageQueue queue =
                      new LocalMessageQueue(
@@ -83,7 +83,7 @@ class StorageLifecycleIntegrationTest {
         try (SegmentedFileWriteAheadLog wal =
                      new SegmentedFileWriteAheadLog(
                              walDirectory,
-                             9
+                             45
                      );
              LocalMessageQueue recovered =
                      new LocalMessageQueue(
@@ -108,6 +108,7 @@ class StorageLifecycleIntegrationTest {
                 new SnapshotCompactionCoordinator(
                         snapshotStore,
                         new WalCompactionBoundaryTracker(),
+                        wal.storageLineage(),
                         wal::validatePosition,
                         new WalCompactionCoordinator(
                                 new WalCompactionPlanner(),

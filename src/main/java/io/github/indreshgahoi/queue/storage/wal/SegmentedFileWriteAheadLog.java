@@ -2,6 +2,7 @@ package io.github.indreshgahoi.queue.storage.wal;
 
 import io.github.indreshgahoi.queue.storage.DirectoryDurability;
 import io.github.indreshgahoi.queue.storage.WalPosition;
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -27,6 +28,7 @@ public final class SegmentedFileWriteAheadLog
     private final FrameWriter frameWriter;
     private final ActiveSegmentOpener activeSegmentOpener;
     private final DirectoryForcer directoryForcer;
+    private final StorageLineage storageLineage;
 
     private long activeSegmentId;
     private FileChannel activeChannel;
@@ -43,7 +45,27 @@ public final class SegmentedFileWriteAheadLog
                 SegmentedFileWriteAheadLog::promoteSegment,
                 SegmentedFileWriteAheadLog::writeFrame,
                 SegmentedFileWriteAheadLog::openAppendChannel,
-                DirectoryDurability::forceParent
+                DirectoryDurability::forceParent,
+                null
+        );
+    }
+
+    public SegmentedFileWriteAheadLog(
+            Path walDirectory,
+            long segmentTargetBytes,
+            StorageLineage storageLineage
+    ) {
+        this(
+                walDirectory,
+                segmentTargetBytes,
+                SegmentedFileWriteAheadLog::promoteSegment,
+                SegmentedFileWriteAheadLog::writeFrame,
+                SegmentedFileWriteAheadLog::openAppendChannel,
+                DirectoryDurability::forceParent,
+                Objects.requireNonNull(
+                        storageLineage,
+                        "storageLineage"
+                )
         );
     }
 
@@ -64,7 +86,8 @@ public final class SegmentedFileWriteAheadLog
                 segmentPromoter,
                 frameWriter,
                 activeSegmentOpener,
-                DirectoryDurability::forceParent
+                DirectoryDurability::forceParent,
+                null
         );
     }
 
@@ -75,6 +98,26 @@ public final class SegmentedFileWriteAheadLog
             FrameWriter frameWriter,
             ActiveSegmentOpener activeSegmentOpener,
             DirectoryForcer directoryForcer
+    ) {
+        this(
+                walDirectory,
+                segmentTargetBytes,
+                segmentPromoter,
+                frameWriter,
+                activeSegmentOpener,
+                directoryForcer,
+                null
+        );
+    }
+
+    private SegmentedFileWriteAheadLog(
+            Path walDirectory,
+            long segmentTargetBytes,
+            SegmentPromoter segmentPromoter,
+            FrameWriter frameWriter,
+            ActiveSegmentOpener activeSegmentOpener,
+            DirectoryForcer directoryForcer,
+            StorageLineage configuredLineage
     ) {
         this.walDirectory =
                 Objects.requireNonNull(
@@ -113,8 +156,17 @@ public final class SegmentedFileWriteAheadLog
         this.segmentTargetBytes = segmentTargetBytes;
         this.segmentFiles = new WalSegmentFiles();
         this.discovery = new WalSegmentDiscovery();
-        this.initializer = new WalSegmentInitializer();
         this.frameCodec = new WalFrameCodec();
+
+        this.storageLineage =
+                resolveStorageLineage(
+                        configuredLineage
+                );
+
+        this.initializer =
+                new WalSegmentInitializer(
+                        storageLineage
+                );
 
         initialize();
     }
@@ -272,6 +324,11 @@ public final class SegmentedFileWriteAheadLog
     }
 
     @Override
+    public StorageLineage storageLineage() {
+        return storageLineage;
+    }
+
+    @Override
     public synchronized void close() {
         if (closed) {
             return;
@@ -315,6 +372,47 @@ public final class SegmentedFileWriteAheadLog
             throw new WalException(
                     "Failed to initialize segmented WAL: "
                             + walDirectory,
+                    e
+            );
+        }
+    }
+
+    private StorageLineage resolveStorageLineage(
+            StorageLineage configuredLineage
+    ) {
+        try {
+            Files.createDirectories(
+                    walDirectory
+            );
+
+            List<WalSegment> segments =
+                    discovery.discover(
+                            walDirectory
+                    );
+
+            if (segments.isEmpty()) {
+                return configuredLineage == null
+                        ? StorageLineage.create()
+                        : configuredLineage;
+            }
+
+            StorageLineage persisted =
+                    WalSegmentInitializer.readLineage(
+                            segments.getFirst().path()
+                    );
+
+            if (configuredLineage != null
+                    && !configuredLineage.equals(persisted)) {
+                throw new WalException(
+                        "Configured storage lineage does not match WAL lineage"
+                );
+            }
+
+            return persisted;
+
+        } catch (IOException e) {
+            throw new WalException(
+                    "Failed to resolve WAL storage lineage",
                     e
             );
         }

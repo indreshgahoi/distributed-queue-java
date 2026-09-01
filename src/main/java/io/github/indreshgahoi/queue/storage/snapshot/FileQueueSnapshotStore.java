@@ -1,6 +1,7 @@
 package io.github.indreshgahoi.queue.storage.snapshot;
 
 import io.github.indreshgahoi.queue.storage.DirectoryDurability;
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 
 import java.io.IOException;
@@ -31,7 +32,7 @@ public final class FileQueueSnapshotStore
             0x4451534E;
 
     private static final int SNAPSHOT_VERSION =
-            1;
+            2;
 
     private static final int CHECKSUM_BYTES =
             Integer.BYTES;
@@ -594,6 +595,15 @@ public final class FileQueueSnapshotStore
         StringBuilder builder =
                 new StringBuilder();
 
+        builder.append("LINEAGE")
+                .append(SEPARATOR)
+                .append(snapshot.storageLineage().queueId())
+                .append(SEPARATOR)
+                .append(snapshot.storageLineage().generationId())
+                .append(SEPARATOR)
+                .append(snapshot.storageLineage().partitionId())
+                .append('\n');
+
         builder.append("POSITION")
                 .append(SEPARATOR)
                 .append(
@@ -727,6 +737,9 @@ public final class FileQueueSnapshotStore
         WalPosition position =
                 null;
 
+        StorageLineage storageLineage =
+                null;
+
         List<ReadySnapshotEntry> ready =
                 new ArrayList<>();
 
@@ -752,6 +765,23 @@ public final class FileQueueSnapshotStore
                     );
 
             switch (parts[0]) {
+
+                case "LINEAGE" -> {
+                    requireFieldCount(
+                            parts,
+                            4,
+                            "LINEAGE"
+                    );
+
+                    if (storageLineage != null) {
+                        throw new SnapshotException(
+                                "Snapshot contains multiple storage lineages"
+                        );
+                    }
+
+                    storageLineage =
+                            parseStorageLineage(parts);
+                }
 
                 case "POSITION" -> {
 
@@ -898,13 +928,37 @@ public final class FileQueueSnapshotStore
             );
         }
 
+        if (storageLineage == null) {
+            throw new SnapshotException(
+                    "Snapshot does not contain storage lineage"
+            );
+        }
+
         return new QueueSnapshot(
+                storageLineage,
                 position,
                 ready,
                 inFlight,
                 delayed,
                 deadLetters
         );
+    }
+
+    private StorageLineage parseStorageLineage(
+            String[] parts
+    ) {
+        try {
+            return new StorageLineage(
+                    java.util.UUID.fromString(parts[1]),
+                    java.util.UUID.fromString(parts[2]),
+                    Integer.parseInt(parts[3])
+            );
+        } catch (IllegalArgumentException e) {
+            throw new SnapshotException(
+                    "Snapshot contains invalid storage lineage",
+                    e
+            );
+        }
     }
 
     private static void requireFieldCount(

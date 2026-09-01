@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -604,12 +605,14 @@ class SegmentedFileWriteAheadLogTest {
 
         long segmentTargetBytes =
                 WalSegmentInitializer.WAL_HEADER_SIZE + 1;
+        StorageLineage lineage;
 
         try (SegmentedFileWriteAheadLog wal =
                      new SegmentedFileWriteAheadLog(
                              tempDir,
                              segmentTargetBytes
                      )) {
+            lineage = wal.storageLineage();
 
             wal.append(
                     publishRecord(
@@ -639,7 +642,7 @@ class SegmentedFileWriteAheadLogTest {
         );
 
         WalSegmentInitializer initializer =
-                new WalSegmentInitializer();
+                new WalSegmentInitializer(lineage);
 
         /*
          * Strongest simple assertion:
@@ -764,7 +767,11 @@ class SegmentedFileWriteAheadLogTest {
                 );
 
         WalSegmentInitializer initializer =
-                new WalSegmentInitializer();
+                new WalSegmentInitializer(
+                        WalSegmentInitializer.readLineage(
+                                tempDir.resolve("segment-000000.wal")
+                        )
+                );
 
         initializer.initialize(
                 candidate
@@ -1040,7 +1047,11 @@ class SegmentedFileWriteAheadLogTest {
                 );
 
         WalSegmentInitializer initializer =
-                new WalSegmentInitializer();
+                new WalSegmentInitializer(
+                        WalSegmentInitializer.readLineage(
+                                tempDir.resolve("segment-000000.wal")
+                        )
+                );
 
         initializer.initialize(
                 segmentOne
@@ -1917,7 +1928,7 @@ class SegmentedFileWriteAheadLogTest {
         SegmentedFileWriteAheadLog wal =
                 new SegmentedFileWriteAheadLog(
                         tempDir,
-                        9,
+                        WalSegmentInitializer.WAL_HEADER_SIZE + 1,
                         SegmentedFileWriteAheadLog::promoteSegment,
                         SegmentedFileWriteAheadLog::writeFrame,
                         SegmentedFileWriteAheadLog::openAppendChannel,
@@ -1951,7 +1962,7 @@ class SegmentedFileWriteAheadLogTest {
         try (SegmentedFileWriteAheadLog recovered =
                      new SegmentedFileWriteAheadLog(
                              tempDir,
-                             9
+                             WalSegmentInitializer.WAL_HEADER_SIZE + 1
                      )) {
             assertEquals(
                     List.of(first),

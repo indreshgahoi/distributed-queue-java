@@ -1,5 +1,6 @@
 package io.github.indreshgahoi.queue.storage.compaction;
 
+import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshot;
 import io.github.indreshgahoi.queue.storage.snapshot.QueueSnapshotStore;
@@ -18,6 +19,43 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class SnapshotCompactionCoordinatorTest {
 
+    private static final StorageLineage LINEAGE =
+            StorageLineage.create();
+
+    @Test
+    void foreignSnapshotCannotBecomeAuthoritativeOrAuthorizeCompaction() {
+        InMemorySnapshotStore store = new InMemorySnapshotStore();
+        WalCompactionBoundaryTracker tracker =
+                new WalCompactionBoundaryTracker();
+        RecordingWalCompactor compactor =
+                new RecordingWalCompactor();
+        SnapshotCompactionCoordinator coordinator =
+                new SnapshotCompactionCoordinator(
+                        store,
+                        tracker,
+                        LINEAGE,
+                        position -> { },
+                        compactor
+                );
+        QueueSnapshot foreign =
+                new QueueSnapshot(
+                        StorageLineage.create(),
+                        new WalPosition(2, 400),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        List.of()
+                );
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> coordinator.commitSnapshot(foreign)
+        );
+        assertTrue(store.loadLatest().isEmpty());
+        assertTrue(tracker.currentBoundary().isEmpty());
+        assertTrue(compactor.positions.isEmpty());
+    }
+
     @Test
     void committedSnapshotReconstructsBoundaryAfterCoordinatorRestart() {
         InMemorySnapshotStore store = new InMemorySnapshotStore();
@@ -32,6 +70,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -63,6 +102,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> {
                             if (position.segmentId() == 3) {
                                 throw new IllegalArgumentException(
@@ -96,6 +136,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { },
                         compactor
                 );
@@ -118,6 +159,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { },
                         compactor
                 );
@@ -153,6 +195,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -216,6 +259,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         failingStore,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -250,6 +294,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -311,6 +356,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -357,6 +403,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -447,6 +494,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -538,6 +586,7 @@ class SnapshotCompactionCoordinatorTest {
                 new SnapshotCompactionCoordinator(
                         store,
                         tracker,
+                        LINEAGE,
                         position -> { }
                 );
 
@@ -575,6 +624,7 @@ class SnapshotCompactionCoordinatorTest {
             WalPosition position
     ) {
         return new QueueSnapshot(
+                LINEAGE,
                 position,
                 List.of(),
                 List.of(),
