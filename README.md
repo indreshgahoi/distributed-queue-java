@@ -14,20 +14,22 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.17.0 — durable storage lineage.
+Latest release: v0.18.0 — PostgreSQL-backed queue metadata service.
 
-Current development: v0.18.0 — PostgreSQL-backed queue metadata service. A
-separate control-plane process owns tenant-scoped queue identity, lifecycle,
-idempotent creation, and optimistic-concurrency fencing.
+Current development: v0.19.0 — lease-fenced queue provisioning. A separate
+queue-node process claims `PROVISIONING` descriptors, creates lineage-bound
+local WAL storage, and publishes `ACTIVE` only while its durable fencing token
+is still authoritative.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
 
-The Maven build has two independently packaged modules:
+The Maven build has three modules and two independently deployable services:
 
 ```text
 queue-core        durable local queue engine and storage state machine
 metadata-service Spring Boot control-plane service and PostgreSQL repository
+queue-node        Spring Boot reconciliation worker and local storage adapter
 ```
 
 The metadata service keeps its domain authority independent of delivery and
@@ -60,6 +62,10 @@ constructors remain package-private so callers cannot bypass those contracts.
 - Test failure behavior, not only happy paths.
 - Add complexity only when a requirement justifies it.
 
+Repository-wide conventions for architecture, Java formatting, naming,
+testing, logging, durability, API evolution, and review are defined in the
+[engineering guidelines](docs/engineering-guidelines.md).
+
 ## Roadmap
 
 The roadmap is organized around correctness problems, not feature parity with
@@ -91,27 +97,31 @@ distributed system.
    checkpoint, promotion, and reclamation cycles with observable retries.
 9. **Durable storage lineage** — WAL segments and snapshots are bound to one
    queue, generation, and partition identity.
+10. **Shared metadata authority** — PostgreSQL owns tenant-scoped queue
+    identity, lifecycle, retry-safe creation, and optimistic-concurrency
+    fencing.
 
 ### Current milestone
 
-**v0.18.0 — PostgreSQL-backed queue metadata service**
+**v0.19.0 — Lease-fenced queue provisioning and reconciliation**
 
-Introduce a separate metadata control plane backed by PostgreSQL. It allocates
-tenant-scoped queues in `PROVISIONING`, provides retry-safe creation through
-idempotency keys, and fences lifecycle changes with generation ID and metadata
-version. Queue-node provisioning remains the next distributed workflow.
+Introduce a separate queue-node worker. PostgreSQL grants a finite provisioning
+lease with a monotonically increasing fencing token; the winner creates storage
+for the exact queue/generation/partition lineage and conditionally completes
+the lifecycle transition. Expired or superseded workers cannot publish
+`ACTIVE`, while deterministic storage creation makes crash retries safe.
 
 ### Next decision area
 
-After v0.18.0, the repository will be reviewed again before selecting a
+After v0.19.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,
   and disk consumption under sustained producer load.
 - **Producer idempotency** — resolve duplicate publication when a producer
   retries after an ambiguous response.
-- **Queue-node provisioning and reconciliation** — turn `PROVISIONING`
-  descriptors into lineage-matched local storage and recover incomplete work.
+- **Queue-node membership and partition placement** — assign storage ownership
+  to registered nodes rather than allowing any node to claim any queue.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
@@ -138,14 +148,15 @@ All commands below run from the repository root.
 
 #### 2. Start PostgreSQL and the service
 
-Build the Java 21 service image and start both containers in the background:
+Build the Java 21 service images and start all containers in the background:
 
 ```bash
 docker compose up --detach --build
 ```
 
-Compose waits for PostgreSQL to become healthy before starting the service.
-Flyway creates or upgrades the metadata schema during application startup.
+Compose waits for PostgreSQL to become healthy before starting the metadata
+service. Flyway creates or upgrades the schema, and the queue node continuously
+reconciles newly created queues.
 
 Follow startup logs with:
 
@@ -164,7 +175,8 @@ Check container state:
 docker compose ps
 ```
 
-`postgres` should report `healthy`, and `metadata-service` should report `Up`.
+`postgres` should report `healthy`; `metadata-service` and `queue-node` should
+report `Up`.
 Then verify the application health endpoint:
 
 ```bash
@@ -200,10 +212,10 @@ Recommended first request:
 5. Keep the example body `{"queueName":"orders"}`.
 6. Execute the request and expect `201 Created`.
 
-The new descriptor is deliberately returned in `PROVISIONING`. The current
-customer API cannot promote it to `ACTIVE`; that transition is reserved for a
-future trusted provisioner. Consequently, attempting to delete this newly
-created queue currently returns a lifecycle conflict by design.
+The create response may initially report `PROVISIONING`. Poll the GET operation:
+the queue node should create its lineage-bound WAL and promote the descriptor to
+`ACTIVE`. Provisioning is asynchronous, so clients must not treat the create
+response as storage readiness.
 
 #### 5. Test from the command line
 
@@ -241,7 +253,7 @@ Stop containers while preserving PostgreSQL data:
 docker compose down
 ```
 
-To also remove the local PostgreSQL volume and start with an empty database:
+To also remove PostgreSQL metadata and queue-node storage and start empty:
 
 ```bash
 docker compose down --volumes
@@ -287,6 +299,17 @@ METADATA_DATABASE_PASSWORD=queue
 METADATA_HTTP_PORT=8080
 ```
 
+The queue node reads:
+
+```text
+QUEUE_NODE_ID=local-node-1
+METADATA_SERVICE_URL=http://localhost:8080
+QUEUE_STORAGE_ROOT=./queue-data
+PROVISIONING_LEASE_DURATION=PT30S
+PROVISIONING_POLL_DELAY=PT1S
+QUEUE_WAL_SEGMENT_BYTES=16777216
+```
+
 Flyway applies versioned schema migrations before the service becomes ready.
 The REST resources are:
 
@@ -298,10 +321,17 @@ DELETE /api/v1/tenants/{tenantId}/queues/{queueName}
 GET    /actuator/health
 ```
 
+The queue node uses the trusted, non-customer provisioning endpoints under
+`/internal/v1/provisioning`. They are intentionally unauthenticated for this
+local learning deployment and must not be exposed outside a trusted network.
+See the [provisioning sequence](docs/diagrams/provisioning-claim-sequence.md)
+and [decision flow](docs/diagrams/provisioning-claim-flow.md) for the complete
+lease and fencing protocol.
+
 `POST` requires an `Idempotency-Key` header and a JSON body such as
 `{"queueName":"orders"}`. It returns `201 Created`, a resource `Location`,
-and a `PROVISIONING` descriptor. Validation and domain failures use standard
-`application/problem+json` responses. Only a future trusted provisioner may
-transition the descriptor to `ACTIVE`.
+and normally a `PROVISIONING` descriptor. Validation and domain failures use
+standard `application/problem+json` responses. The queue node later transitions
+the descriptor to `ACTIVE` through a lease-fenced internal API.
 PostgreSQL integration tests use an ephemeral Testcontainers database and are
 skipped when Docker is unavailable.

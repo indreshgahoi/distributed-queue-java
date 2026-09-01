@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: queue-node
+  main:
+    web-application-type: none
+
+queue:
+  node:
+    id: ${QUEUE_NODE_ID:local-node-1}
+    metadata-base-url: ${METADATA_SERVICE_URL:http://localhost:8080}
+    storage-root: ${QUEUE_STORAGE_ROOT:./queue-data}
+    lease-duration: ${PROVISIONING_LEASE_DURATION:PT30S}
+    poll-delay: ${PROVISIONING_POLL_DELAY:PT1S}
+    wal-segment-bytes: ${QUEUE_WAL_SEGMENT_BYTES:16777216}

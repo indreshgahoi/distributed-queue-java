@@ -588,3 +588,44 @@ Keep message data in the separate `queue-core` module.
 - authentication, authorization, quotas, and rate limits;
 - schema rollback policy and zero-downtime migration compatibility;
 - metadata replication beyond PostgreSQL's own deployment model.
+
+## v0.19.0 — Lease-Fenced Queue Provisioning
+
+### Decision
+
+Provision queue storage through a separately deployed queue-node reconciler.
+PostgreSQL grants one finite claim for an eligible `PROVISIONING` descriptor
+and increments a durable fencing token whenever an expired claim is taken
+over. Storage creation is deterministic and bound to the descriptor's exact
+queue, generation, and partition lineage. Only the current, unexpired claim
+may publish `ACTIVE` or `PROVISIONING_FAILED`.
+
+### Gain
+
+- closes the metadata/filesystem transaction gap through observable,
+  retryable reconciliation;
+- prevents a delayed worker from publishing lifecycle state after takeover;
+- makes worker crash recovery independent of process-local locks;
+- exercises leases, fencing, idempotence, and conditional publication across
+  service and storage boundaries;
+- preserves PostgreSQL as control-plane authority and the WAL as data-plane
+  durability authority.
+
+### Cost
+
+- queue readiness becomes asynchronous after a successful create request;
+- correctness depends on bounded claim duration and database time;
+- a worker that exceeds its lease may finish harmless storage work but cannot
+  publish it;
+- claim records remain after completion to make ambiguous completion retries
+  idempotent;
+- the internal provisioning API adds an operational trust boundary.
+
+### Deferred
+
+- claim renewal for long-running provisioning;
+- authenticated service-to-service APIs;
+- durable node registration and health;
+- partition placement and runtime ownership epochs;
+- automatic retry policy for `PROVISIONING_FAILED` descriptors;
+- deletion reconciliation and storage garbage collection.

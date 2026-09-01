@@ -5,13 +5,14 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>io.github.indreshgahoi</groupId>
     <artifactId>distributed-queue-parent</artifactId>
-    <version>0.18.0-SNAPSHOT</version>
+    <version>0.19.0-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>Distributed Queue in Java</name>
 
     <modules>
         <module>queue-core</module>
         <module>metadata-service</module>
+        <module>queue-node</module>
     </modules>
 
     <properties>
@@ -21,6 +22,7 @@
         <spring-boot.version>4.1.1</spring-boot.version>
         <springdoc-openapi.version>3.1.0</springdoc-openapi.version>
         <testcontainers.version>2.0.5</testcontainers.version>
+        <lombok.version>1.18.46</lombok.version>
         <maven.compiler.plugin.version>3.13.0</maven.compiler.plugin.version>
         <maven.surefire.plugin.version>3.5.2</maven.surefire.plugin.version>
     </properties>
@@ -47,6 +49,13 @@
                     <configuration>
                         <release>${maven.compiler.release}</release>
                         <parameters>true</parameters>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
                     </configuration>
                 </plugin>
                 <plugin>

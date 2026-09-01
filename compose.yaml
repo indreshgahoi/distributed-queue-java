@@ -31,5 +31,23 @@ services:
       - "8080:8080"
     restart: unless-stopped
 
+  queue-node:
+    build:
+      context: .
+      dockerfile: queue-node/Dockerfile
+    depends_on:
+      metadata-service:
+        condition: service_started
+    environment:
+      QUEUE_NODE_ID: local-node-1
+      METADATA_SERVICE_URL: http://metadata-service:8080
+      QUEUE_STORAGE_ROOT: /var/lib/distributed-queue
+      PROVISIONING_LEASE_DURATION: PT30S
+      PROVISIONING_POLL_DELAY: PT1S
+    restart: unless-stopped
+    volumes:
+      - queue-node-data:/var/lib/distributed-queue
+
 volumes:
   queue-metadata-postgres:
+  queue-node-data:

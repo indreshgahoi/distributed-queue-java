@@ -2,6 +2,10 @@ package io.github.indreshgahoi.queue.metadata;
 
 import io.github.indreshgahoi.queue.metadata.application.port.in.QueueCatalogUseCase;
 import io.github.indreshgahoi.queue.metadata.application.port.in.QueueLifecycleUseCase;
+import io.github.indreshgahoi.queue.metadata.application.port.in.QueueProvisioningUseCase;
+import io.github.indreshgahoi.queue.metadata.domain.exception.ProvisioningClaimLostException;
+import io.github.indreshgahoi.queue.metadata.domain.model.ClaimProvisioningCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.ProvisioningClaim;
 import io.github.indreshgahoi.queue.metadata.domain.exception.IdempotencyConflictException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueAlreadyExistsException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.StaleQueueMetadataException;
@@ -12,7 +16,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.junit.jupiter.Container;
@@ -27,6 +35,11 @@ import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -43,6 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT
 )
+@Import(PostgresQueueMetadataRepositoryTest.ClockConfiguration.class)
 class PostgresQueueMetadataRepositoryTest {
 
     @Container
@@ -57,6 +71,12 @@ class PostgresQueueMetadataRepositoryTest {
 
     @Autowired
     private QueueLifecycleUseCase lifecycle;
+
+    @Autowired
+    private QueueProvisioningUseCase provisioning;
+
+    @Autowired
+    private TestClock clock;
 
     @LocalServerPort
     private int serverPort;
@@ -76,9 +96,11 @@ class PostgresQueueMetadataRepositoryTest {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.execute(
-                    "TRUNCATE metadata_requests, queues CASCADE"
+                    "TRUNCATE queue_provisioning_claims, "
+                            + "metadata_requests, queues CASCADE"
             );
         }
+        clock.set(Instant.parse("2026-09-01T12:00:00Z"));
     }
 
     @Test
@@ -264,6 +286,102 @@ class PostgresQueueMetadataRepositoryTest {
     }
 
     @Test
+    void provisioningClaimIsExclusiveAndCompletionActivatesQueue() {
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        "node-a",
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+
+        assertEquals(queue.queueId(), claim.identity().queueId());
+        assertEquals(1, claim.identity().fencingToken());
+        assertTrue(provisioning.claim(
+                new ClaimProvisioningCommand(
+                        "node-b",
+                        Duration.ofSeconds(30)
+                )
+        ).isEmpty());
+
+        QueueDescriptor active = provisioning.complete(
+                claim.identity()
+        );
+        assertEquals(QueueLifecycleState.ACTIVE, active.lifecycleState());
+        assertEquals(1, active.metadataVersion());
+        assertEquals(active, provisioning.complete(claim.identity()));
+    }
+
+    @Test
+    void expiredClaimIsTakenOverAndOldTokenIsFenced() {
+        catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim first = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        "node-a",
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+
+        clock.advance(Duration.ofSeconds(31));
+        ProvisioningClaim second = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        "node-b",
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+
+        assertEquals(2, second.identity().fencingToken());
+        assertThrows(
+                ProvisioningClaimLostException.class,
+                () -> provisioning.complete(first.identity())
+        );
+        assertEquals(
+                QueueLifecycleState.ACTIVE,
+                provisioning.complete(second.identity()).lifecycleState()
+        );
+    }
+
+    @Test
+    void concurrentWorkersReceiveOnlyOneActiveClaim()
+            throws Exception {
+        catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        List<Callable<java.util.Optional<ProvisioningClaim>>> calls =
+                IntStream.range(0, 12)
+                        .mapToObj(index ->
+                                (Callable<java.util.Optional<ProvisioningClaim>>)
+                                        () -> provisioning.claim(
+                                                new ClaimProvisioningCommand(
+                                                        "node-" + index,
+                                                        Duration.ofSeconds(30)
+                                                )
+                                        )
+                        )
+                        .toList();
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            long claims = executor.invokeAll(calls)
+                    .stream()
+                    .filter(future -> {
+                        try {
+                            return future.get().isPresent();
+                        } catch (Exception e) {
+                            throw new AssertionError(e);
+                        }
+                    })
+                    .count();
+
+            assertEquals(1, claims);
+        }
+    }
+
+    @Test
     void httpBoundaryCreatesAndReadsQueue()
             throws Exception {
         HttpClient client = HttpClient.newHttpClient();
@@ -401,5 +519,45 @@ class PostgresQueueMetadataRepositoryTest {
                 queueName,
                 idempotencyKey
         );
+    }
+
+    @TestConfiguration
+    static class ClockConfiguration {
+        @Bean
+        @Primary
+        TestClock testClock() {
+            return new TestClock();
+        }
+    }
+
+    static final class TestClock extends Clock {
+        private Instant current =
+                Instant.parse("2026-09-01T12:00:00Z");
+
+        synchronized void set(Instant instant) {
+            current = instant;
+        }
+
+        synchronized void advance(Duration duration) {
+            current = current.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            if (!ZoneOffset.UTC.equals(zone)) {
+                throw new IllegalArgumentException("Only UTC is supported");
+            }
+            return this;
+        }
+
+        @Override
+        public synchronized Instant instant() {
+            return current;
+        }
     }
 }

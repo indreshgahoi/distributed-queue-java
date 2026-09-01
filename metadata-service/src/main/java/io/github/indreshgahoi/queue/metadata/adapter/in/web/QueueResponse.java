@@ -28,7 +28,7 @@ public record QueueResponse(
         @Schema(example = "2026-09-01T12:00:00Z")
         Instant updatedAt
 ) {
-    static QueueResponse from(QueueDescriptor descriptor) {
+    public static QueueResponse from(QueueDescriptor descriptor) {
         return new QueueResponse(
                 descriptor.tenantId(),
                 descriptor.queueName(),

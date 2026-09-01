@@ -2237,3 +2237,49 @@ The Spring Boot metadata service publishes versioned REST resources, applies
 Flyway migrations before readiness, reports database-aware health, shuts down
 gracefully, and represents API errors as `application/problem+json`. These
 operational mechanisms do not change queue message semantics.
+
+## v0.19.0 — Lease-Fenced Queue Provisioning
+
+### G179 — Provisioning work is durably claimed
+
+PostgreSQL is authoritative for provisioning claims. A claim identifies the
+queue ID, generation ID, partition ID, worker ID, fencing token, and lease
+expiry. Claim creation and takeover are atomic database transactions.
+
+### G180 — Claim leases permit recovery, not authority after expiry
+
+An unexpired claim prevents another worker from claiming the same queue. After
+its lease expires, another worker may take over. Lease expiry does not stop the
+old process and therefore does not by itself authorize completion.
+
+### G181 — Every takeover advances the fencing token
+
+The first claim receives token one. Every later claim for the same queue
+increments the token. Tokens never decrease or repeat for that queue ID.
+
+### G182 — Completion is fenced at the metadata mutation
+
+Provisioning completion compares queue ID, generation ID, partition ID,
+worker ID, fencing token, current lifecycle state, and claim lease. Only the
+current unexpired claim may move `PROVISIONING` to `ACTIVE`; stale completion
+changes nothing.
+
+### G183 — Storage materialization is lineage-bound and idempotent
+
+The queue node creates storage beneath an immutable
+`queueId/generationId/partitionId` path and opens the WAL with that complete
+expected lineage. Repeating materialization for the same lineage succeeds.
+Existing storage carrying another lineage fails closed.
+
+### G184 — Metadata activation is the publication point
+
+Creating local files does not make a queue active. The queue becomes eligible
+for future routing only after the fenced PostgreSQL completion commits. A
+crash between storage creation and completion leaves replayable provisioning
+work.
+
+### G185 — v0.19 does not grant data-plane ownership
+
+A provisioning claim authorizes only storage materialization and its metadata
+completion. It does not authorize publish, receive, partition leadership,
+traffic routing, replication, or ownership transfer.

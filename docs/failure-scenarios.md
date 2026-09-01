@@ -1183,3 +1183,57 @@ Required behavior:
     preserve DELETING across service restart
     make repeated customer deletion idempotent
     do not free the live tenant/name until DELETED is authoritative
+
+## F58 — Provisioner Crashes Before Creating Storage
+
+The worker holds a claim but exits before materializing the WAL.
+
+Required behavior:
+
+    leave metadata in PROVISIONING
+    permit takeover only after the claim lease expires
+    issue a strictly greater fencing token to the next worker
+
+## F59 — Provisioner Crashes After Storage Creation
+
+Lineage-matched storage is durable, but the worker exits before reporting
+completion.
+
+Required behavior:
+
+    keep metadata in PROVISIONING
+    allow a later claimant to reopen and validate the same lineage
+    make repeated materialization harmless
+    activate only through a current fenced completion
+
+## F60 — Stale Worker Completes After Takeover
+
+Worker A pauses, its lease expires, and worker B takes over with a greater
+token. Worker A then resumes and reports success.
+
+Required behavior:
+
+    compare the token atomically with the lifecycle update
+    reject worker A even if its storage side effect succeeded
+    allow only worker B's current unexpired claim to publish ACTIVE
+
+## F61 — Foreign Lineage Exists at the Assigned Path
+
+The target WAL directory contains valid storage for another queue,
+generation, or partition.
+
+Required behavior:
+
+    fail storage materialization before append or recovery
+    never rewrite or adopt the foreign lineage
+    never report successful provisioning
+
+## F62 — Provisioning Completion Response Is Lost
+
+PostgreSQL commits `ACTIVE`, but the response to the queue node is lost.
+
+Required behavior:
+
+    a retry with the same claim identity returns the ACTIVE descriptor
+    do not increment metadata version more than once
+    reject completion from any older claim token

@@ -3,10 +3,14 @@ package io.github.indreshgahoi.queue.metadata.adapter.out.postgres;
 import io.github.indreshgahoi.queue.metadata.application.port.out.QueueMetadataRepository;
 import io.github.indreshgahoi.queue.metadata.domain.exception.IdempotencyConflictException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.MetadataUnavailableException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.ProvisioningClaimLostException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueAlreadyExistsException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueMetadataException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.StaleQueueMetadataException;
 import io.github.indreshgahoi.queue.metadata.domain.model.CreateQueueCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.ClaimProvisioningCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.ProvisioningClaim;
+import io.github.indreshgahoi.queue.metadata.domain.model.ProvisioningClaimIdentity;
 import io.github.indreshgahoi.queue.metadata.domain.model.QueueDescriptor;
 import io.github.indreshgahoi.queue.metadata.domain.model.QueueLifecycleState;
 import org.springframework.stereotype.Repository;
@@ -83,6 +87,68 @@ class PostgresQueueMetadataRepository
             );
             return descriptor;
         });
+    }
+
+    @Override
+    public Optional<ProvisioningClaim> claimProvisioning(
+            ClaimProvisioningCommand command
+    ) {
+        Objects.requireNonNull(command, "command");
+        return inTransaction(connection -> {
+            Instant claimedAt = now();
+            Optional<QueueDescriptor> candidate =
+                    lockProvisioningCandidate(
+                            connection,
+                            claimedAt
+                    );
+            if (candidate.isEmpty()) {
+                return Optional.empty();
+            }
+            QueueDescriptor queue = candidate.orElseThrow();
+            Instant leaseExpiresAt = claimedAt.plus(
+                    command.leaseDuration()
+            );
+            long token = upsertClaim(
+                    connection,
+                    queue,
+                    command.workerId(),
+                    leaseExpiresAt,
+                    claimedAt
+            );
+            return Optional.of(
+                    new ProvisioningClaim(
+                            queue,
+                            new ProvisioningClaimIdentity(
+                                    queue.queueId(),
+                                    queue.generationId(),
+                                    0,
+                                    command.workerId(),
+                                    token
+                            ),
+                            leaseExpiresAt
+                    )
+            );
+        });
+    }
+
+    @Override
+    public QueueDescriptor completeProvisioning(
+            ProvisioningClaimIdentity claim
+    ) {
+        return finishProvisioning(
+                claim,
+                QueueLifecycleState.ACTIVE
+        );
+    }
+
+    @Override
+    public QueueDescriptor failProvisioning(
+            ProvisioningClaimIdentity claim
+    ) {
+        return finishProvisioning(
+                claim,
+                QueueLifecycleState.PROVISIONING_FAILED
+        );
     }
 
     @Override
@@ -260,6 +326,153 @@ class PostgresQueueMetadataRepository
                     Timestamp.from(now())
             );
             return statement.executeUpdate() == 1;
+        }
+    }
+
+    private Optional<QueueDescriptor> lockProvisioningCandidate(
+            Connection connection,
+            Instant claimedAt
+    ) throws SQLException {
+        String sql = """
+                SELECT q.*
+                FROM queues q
+                WHERE q.lifecycle_state = 'PROVISIONING'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM queue_provisioning_claims c
+                      WHERE c.queue_id = q.queue_id
+                        AND c.lease_expires_at > ?
+                  )
+                ORDER BY q.created_at, q.queue_id
+                FOR UPDATE OF q SKIP LOCKED
+                LIMIT 1
+                """;
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setTimestamp(1, Timestamp.from(claimedAt));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next()
+                        ? Optional.of(map(resultSet))
+                        : Optional.empty();
+            }
+        }
+    }
+
+    private long upsertClaim(
+            Connection connection,
+            QueueDescriptor queue,
+            String workerId,
+            Instant leaseExpiresAt,
+            Instant claimedAt
+    ) throws SQLException {
+        String sql = """
+                INSERT INTO queue_provisioning_claims (
+                    queue_id,
+                    generation_id,
+                    partition_id,
+                    worker_id,
+                    fencing_token,
+                    lease_expires_at,
+                    updated_at
+                ) VALUES (?, ?, 0, ?, 1, ?, ?)
+                ON CONFLICT (queue_id) DO UPDATE
+                SET generation_id = EXCLUDED.generation_id,
+                    partition_id = EXCLUDED.partition_id,
+                    worker_id = EXCLUDED.worker_id,
+                    fencing_token =
+                        queue_provisioning_claims.fencing_token + 1,
+                    lease_expires_at = EXCLUDED.lease_expires_at,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING fencing_token
+                """;
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setObject(1, queue.queueId());
+            statement.setObject(2, queue.generationId());
+            statement.setString(3, workerId);
+            statement.setTimestamp(4, Timestamp.from(leaseExpiresAt));
+            statement.setTimestamp(5, Timestamp.from(claimedAt));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new QueueMetadataException(
+                            "Provisioning claim was not recorded"
+                    );
+                }
+                return resultSet.getLong("fencing_token");
+            }
+        }
+    }
+
+    private QueueDescriptor finishProvisioning(
+            ProvisioningClaimIdentity claim,
+            QueueLifecycleState completedState
+    ) {
+        Objects.requireNonNull(claim, "claim");
+        return inTransaction(connection -> {
+            LockedProvisioningClaim current = lockClaim(
+                    connection,
+                    claim.queueId()
+            ).orElseThrow(ProvisioningClaimLostException::new);
+            if (!current.matches(claim)) {
+                throw new ProvisioningClaimLostException();
+            }
+            QueueDescriptor queue = current.queue();
+            if (queue.lifecycleState() == completedState) {
+                return queue;
+            }
+            if (queue.lifecycleState()
+                    != QueueLifecycleState.PROVISIONING
+                    || !current.leaseExpiresAt().isAfter(now())) {
+                throw new ProvisioningClaimLostException();
+            }
+            return updateTransition(
+                    connection,
+                    queue,
+                    completedState
+            );
+        });
+    }
+
+    private Optional<LockedProvisioningClaim> lockClaim(
+            Connection connection,
+            UUID queueId
+    ) throws SQLException {
+        String sql = """
+                SELECT q.*,
+                       c.generation_id AS claim_generation_id,
+                       c.partition_id AS claim_partition_id,
+                       c.worker_id AS claim_worker_id,
+                       c.fencing_token AS claim_fencing_token,
+                       c.lease_expires_at AS claim_lease_expires_at
+                FROM queues q
+                JOIN queue_provisioning_claims c
+                  ON c.queue_id = q.queue_id
+                WHERE q.queue_id = ?
+                FOR UPDATE OF q, c
+                """;
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setObject(1, queueId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(
+                        new LockedProvisioningClaim(
+                                map(resultSet),
+                                resultSet.getObject(
+                                        "claim_generation_id",
+                                        UUID.class
+                                ),
+                                resultSet.getInt("claim_partition_id"),
+                                resultSet.getString("claim_worker_id"),
+                                resultSet.getLong("claim_fencing_token"),
+                                resultSet.getTimestamp(
+                                        "claim_lease_expires_at"
+                                ).toInstant()
+                        )
+                );
+            }
         }
     }
 
@@ -601,5 +814,22 @@ class PostgresQueueMetadataRepository
     private interface SqlTransaction<T> {
         T execute(Connection connection)
                 throws SQLException;
+    }
+
+    private record LockedProvisioningClaim(
+            QueueDescriptor queue,
+            UUID generationId,
+            int partitionId,
+            String workerId,
+            long fencingToken,
+            Instant leaseExpiresAt
+    ) {
+        boolean matches(ProvisioningClaimIdentity identity) {
+            return queue.queueId().equals(identity.queueId())
+                    && generationId.equals(identity.generationId())
+                    && partitionId == identity.partitionId()
+                    && workerId.equals(identity.workerId())
+                    && fencingToken == identity.fencingToken();
+        }
     }
 }
