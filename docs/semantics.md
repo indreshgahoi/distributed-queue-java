@@ -2068,3 +2068,63 @@ stops reclamation and is safe to retry.
 If the platform cannot open and force the parent directory, an authority
 transition requiring directory durability fails. The implementation must not
 silently downgrade its durability contract.
+
+## v0.16.0 — Automatic Bounded Storage Lifecycle
+
+### G153 — Checkpoint policy depends on durable WAL progress
+
+The initial policy uses WAL segment distance from the latest authoritative
+snapshot. Volatile queue depth and process-local transition counters do not
+define durable checkpoint progress.
+
+### G154 — Policy and lifecycle mechanism are separate
+
+`CheckpointPolicy` decides whether current WAL progress warrants a new
+checkpoint. `StorageLifecycleManager` owns scheduling, snapshot capture,
+commit, reclamation retry, failure observation, and shutdown.
+
+### G155 — Maintenance cycles are serialized
+
+Scheduled and explicitly invoked maintenance cycles must never overlap within
+one lifecycle manager. At most one snapshot/compaction sequence may execute at
+a time.
+
+### G156 — Maintenance failure does not reverse queue operations
+
+Queue transitions already acknowledged through the WAL remain successful when
+later background snapshot or reclamation work fails. Maintenance failure is
+recorded for observation and retried independently.
+
+### G157 — Snapshot-save failure requires a new capture attempt
+
+If a candidate did not become authoritative, the next eligible cycle captures
+queue state again. It must not assume that the failed candidate is committed.
+
+### G158 — Post-commit reclamation failure is retried without new WAL progress
+
+If the candidate is now the authoritative snapshot but reclamation failed,
+the next cycle retries compaction from that snapshot even when the checkpoint
+policy would not request a newer snapshot.
+
+### G159 — Existing snapshots trigger startup reconciliation
+
+When lifecycle management starts with an existing authoritative snapshot, its
+first maintenance cycle retries eligible reclamation. This recovers cleanup
+work lost because of an earlier failure or process crash.
+
+### G160 — Scheduled failures do not stop future cycles
+
+A failed scheduled cycle must not cancel fixed-delay execution. The failure is
+observable, and later cycles continue so transient storage errors can recover.
+
+### G161 — Lifecycle shutdown is explicit and idempotent
+
+Closing the lifecycle manager stops future scheduling. Further explicit
+maintenance calls are rejected, and repeated close calls are safe.
+
+### G162 — Segment-distance policy gives a physical-history bound
+
+With successful periodic maintenance, a threshold of N segments triggers a
+checkpoint after the active segment advances N IDs beyond the latest snapshot
+segment. The threshold is not a hard byte bound because a complete WAL frame
+may exceed the configured segment target.

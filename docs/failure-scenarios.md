@@ -1028,3 +1028,59 @@ Required behavior:
 
 A force failure stops cleanup; recovery safety remains more important than
 reclaiming all eligible space.
+
+## F44 — Snapshot Is Never Scheduled
+
+The queue runs correctly for months, but no caller invokes snapshot and
+compaction coordination. Segmented WAL converts one growing file into an
+unbounded number of files.
+
+Required behavior:
+
+    observe durable WAL segment progress
+    automatically checkpoint after configured segment distance
+    reclaim only after authoritative promotion
+
+## F45 — Snapshot Save Fails During Scheduled Maintenance
+
+The policy requests a checkpoint, but candidate writing, forcing, or promotion
+fails before a new snapshot is authoritative.
+
+Required behavior:
+
+    preserve existing recovery authority
+    expose maintenance failure
+    capture fresh queue state on a later eligible cycle
+    do not reclaim from the failed candidate
+
+## F46 — Reclamation Fails After Snapshot Commit
+
+The new snapshot is authoritative, but deleting an eligible segment fails.
+No further WAL segment rotation occurs before the next maintenance cycle.
+
+Required behavior:
+
+    remember/reconstruct authoritative snapshot position
+    retry reclamation without requiring new WAL progress
+
+## F47 — Scheduled Cycle Throws
+
+A fixed-delay maintenance task encounters a transient storage exception. If
+the exception escapes the scheduler task, subsequent execution may be
+cancelled permanently.
+
+Required behavior:
+
+    record failure for observation
+    contain exception at scheduler boundary
+    continue later maintenance cycles
+
+## F48 — Concurrent Manual and Scheduled Maintenance
+
+An operator invokes maintenance while the scheduled cycle is capturing or
+committing a snapshot.
+
+Required behavior:
+
+    serialize both paths through one lifecycle state machine
+    never run overlapping snapshot commits or reclamation passes

@@ -491,3 +491,36 @@ filesystems that cannot provide this operation.
 - a storage abstraction for non-POSIX filesystems;
 - filesystem-specific durability certification;
 - replicated durability.
+
+## v0.16.0 — Segment-Distance Checkpoint Scheduling
+
+### Decision
+
+Run storage maintenance through a single fixed-delay lifecycle manager. Use
+distance in WAL segment IDs from the latest authoritative snapshot as the
+initial checkpoint policy.
+
+### Gain
+
+- WAL reclamation no longer depends on application code remembering each
+  checkpoint;
+- the trigger is derived from durable physical progress and survives restart;
+- policy is deterministic and independently testable;
+- failed cleanup is retried even without a newer snapshot;
+- maintenance failure is isolated from completed queue mutations.
+
+### Cost
+
+- introduces a managed background thread and explicit shutdown responsibility;
+- snapshot capture and filesystem maintenance still consume queue/storage
+  resources;
+- segment distance is an approximate disk bound, not an exact byte bound;
+- callers must monitor exposed lifecycle failure state.
+
+### Deferred
+
+- byte-accurate WAL usage policy;
+- adaptive or time-based checkpoint triggers;
+- asynchronous snapshot serialization from an immutable state view;
+- metrics and external health endpoints;
+- distributed maintenance ownership.

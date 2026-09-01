@@ -14,12 +14,11 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.14.0 — compaction-aware recovery authority.
+Latest release: v0.15.0 — durable filesystem authority transitions.
 
-Current development: v0.15.0 — durable filesystem authority transitions.
-Snapshot promotion, WAL segment publication, and segment reclamation include
-the parent-directory durability boundary rather than relying on atomic rename
-or file forcing alone.
+Current development: v0.16.0 — automatic bounded storage lifecycle. Durable
+WAL segment progress triggers serialized snapshot and reclamation cycles, with
+failure observation and retry semantics separated from queue operations.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
@@ -57,22 +56,22 @@ distributed system.
 6. **Compaction-aware recovery** — startup fails closed when reclaimed history
    makes the authoritative snapshot mandatory, and snapshot authority remains
    monotonic across restart.
+7. **Durable filesystem authority** — snapshot/WAL publication and segment
+   deletion include parent-directory durability boundaries.
 
 ### Current milestone
 
-**v0.15.0 — Durable filesystem authority transitions**
+**v0.16.0 — Automatic bounded storage lifecycle**
 
-Close the gap between durable file contents and durable filesystem names by
-forcing parent directories after snapshot promotion, WAL segment publication,
-and segment deletion.
+Trigger serialized snapshot and reclamation cycles from durable WAL segment
+progress so storage history does not grow indefinitely when callers forget to
+coordinate maintenance manually.
 
 ### Next decision area
 
-After v0.15.0, the repository will be reviewed again before selecting a
+After v0.16.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
-- **Automated storage lifecycle** — prevent operationally unbounded WAL growth
-  when callers do not manually schedule snapshots and reclamation.
 - **Storage lineage identity** — detect snapshots and WAL segments copied from
   different queue generations instead of accepting structurally compatible
   but unrelated recovery artifacts.

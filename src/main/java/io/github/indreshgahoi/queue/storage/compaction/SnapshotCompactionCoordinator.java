@@ -44,14 +44,17 @@ public final class SnapshotCompactionCoordinator {
                         boundaryTracker,
                         "boundaryTracker"
                 );
-        this.walCompactor = Objects.requireNonNull(
-                walCompactor,
-                "walCompactor"
-        );
-        this.positionValidator = Objects.requireNonNull(
-                positionValidator,
-                "positionValidator"
-        );
+        this.walCompactor =
+                Objects.requireNonNull(
+                        walCompactor,
+                        "walCompactor"
+                );
+
+        this.positionValidator =
+                Objects.requireNonNull(
+                        positionValidator,
+                        "positionValidator"
+                );
 
         initializeBoundaryFromAuthoritativeSnapshot();
     }
@@ -86,7 +89,9 @@ public final class SnapshotCompactionCoordinator {
             );
         }
 
-        positionValidator.validate(candidate);
+        positionValidator.validate(
+                candidate
+        );
 
         /*
          * Only after validation may the snapshot
@@ -98,29 +103,77 @@ public final class SnapshotCompactionCoordinator {
          * Successful snapshot promotion allows
          * the boundary to advance.
          */
-        boundaryTracker.advanceTo(
-                candidate
-        );
-
-        /*
-         * Only the successfully promoted snapshot may authorize deletion.
-         * Reclamation failure does not invalidate that recovery point and is
-         * safe to retry because every deletion remains before its segment.
-         */
-        walCompactor.compactThrough(
+        compactValidatedPosition(
                 candidate
         );
     }
 
+    public synchronized Optional<WalPosition> compactLatestSnapshot() {
+        Optional<QueueSnapshot> latest =
+                latestSnapshot();
+
+        if (latest.isEmpty()) {
+            return Optional.empty();
+        }
+
+        WalPosition position =
+                latest.orElseThrow()
+                        .walPosition();
+
+        positionValidator.validate(
+                position
+        );
+
+        compactValidatedPosition(
+                position
+        );
+
+        return Optional.of(
+                position
+        );
+    }
+
+    public synchronized Optional<QueueSnapshot> latestSnapshot() {
+        return snapshotStore
+                .loadLatest();
+    }
+
     private void initializeBoundaryFromAuthoritativeSnapshot() {
-        snapshotStore.loadLatest()
-                .ifPresent(snapshot -> {
-                    positionValidator.validate(
-                            snapshot.walPosition()
-                    );
-                    boundaryTracker.advanceTo(
-                            snapshot.walPosition()
-                    );
-                });
+        latestSnapshot()
+                .ifPresent(
+                        this::initializeBoundary
+                );
+    }
+
+    private void initializeBoundary(
+            QueueSnapshot snapshot
+    ) {
+        WalPosition position =
+                snapshot.walPosition();
+
+        positionValidator.validate(
+                position
+        );
+
+        boundaryTracker.advanceTo(
+                position
+        );
+    }
+
+    private void compactValidatedPosition(
+            WalPosition position
+    ) {
+        /*
+         * Only a validated, successfully promoted snapshot may authorize
+         * deletion. Reclamation failure does not invalidate that recovery
+         * point and remains safe to retry.
+         */
+        boundaryTracker.advanceTo(
+                position
+        );
+
+        walCompactor.compactThrough(
+                position
+        );
     }
 }
