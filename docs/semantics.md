@@ -2337,3 +2337,50 @@ silently creating an unrelated authoritative copy.
 Placement identifies where partition storage is intended to live and fences
 provisioning. It does not yet authorize send/receive traffic, establish a
 partition leader, or prove that the node is ready to serve messages.
+
+## v0.21.0 — Fenced Runtime Partition Activation
+
+### G194 — Runtime activation requires an ACTIVE queue
+
+The node-specific runtime-placement API returns only placements whose queue is
+`ACTIVE`. A durable placement by itself does not authorize recovery while
+provisioning is incomplete.
+
+### G195 — Runtime authority composes existing fencing dimensions
+
+Runtime identity is `(queueId, generationId, partitionId, nodeId,
+registrationEpoch, placementEpoch)`. v0.21 does not introduce a second lease:
+the registration lease fences process lifetime and placement epoch fences
+assignment lifetime.
+
+### G196 — Recovery precedes READY publication
+
+A queue node opens lineage-bound snapshot and segmented WAL storage and fully
+recovers `LocalMessageQueue` before publishing `READY`. Filesystem presence or
+successful provisioning alone is not runtime readiness.
+
+### G197 — PostgreSQL fences runtime-state publication
+
+`READY` and `FAILED` publication succeeds only when the queue remains `ACTIVE`,
+the placement still names the caller and placement epoch, and the caller's
+registration epoch and lease remain current.
+
+### G198 — Stale recovery results are never installed
+
+Recovery may finish after registration or placement authority changes. The
+node rechecks local registration and PostgreSQL atomically rechecks durable
+authority before `READY`; rejected results are closed and never enter the
+active runtime map.
+
+### G199 — Registration loss fails closed
+
+When no unexpired current registration is observable, the queue node closes all
+active runtimes and stops advertising local readiness. Availability is not
+preferred over ambiguous process authority.
+
+### G200 — Runtime status is observation, not new authority
+
+The runtime-status row records the last successfully fenced `READY` or `FAILED`
+publication. It does not extend a registration lease, change placement, or
+authorize reassignment. Consumers must interpret it together with current
+registration and placement metadata.

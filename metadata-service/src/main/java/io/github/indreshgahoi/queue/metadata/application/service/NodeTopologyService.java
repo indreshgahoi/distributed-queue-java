@@ -5,6 +5,9 @@ import io.github.indreshgahoi.queue.metadata.application.port.out.NodeTopologyRe
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeLeaseIdentity;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeRegistration;
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionPlacement;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeIdentity;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeState;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeStatus;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -52,5 +55,55 @@ final class NodeTopologyService implements NodeTopologyUseCase {
     @Override
     public List<PartitionPlacement> placements() {
         return repository.placements();
+    }
+
+    @Override
+    public List<PartitionPlacement> activePlacements(
+            NodeLeaseIdentity identity
+    ) {
+        return repository.activePlacements(identity);
+    }
+
+    @Override
+    public PartitionRuntimeStatus publishRuntimeStatus(
+            PartitionRuntimeIdentity identity,
+            PartitionRuntimeState state,
+            String failureReason
+    ) {
+        if (state == PartitionRuntimeState.READY
+                && failureReason != null) {
+            throw new IllegalArgumentException(
+                    "READY runtime cannot have a failure reason"
+            );
+        }
+        if (state == PartitionRuntimeState.FAILED
+                && (failureReason == null || failureReason.isBlank())) {
+            throw new IllegalArgumentException(
+                    "FAILED runtime requires a failure reason"
+            );
+        }
+        PartitionRuntimeStatus status = repository.publishRuntimeStatus(
+                identity,
+                state,
+                failureReason
+        );
+        log.info(
+                "event=partition_runtime_status_published queueId={} "
+                        + "generationId={} partitionId={} nodeId={} "
+                        + "registrationEpoch={} placementEpoch={} state={}",
+                identity.queueId(),
+                identity.generationId(),
+                identity.partitionId(),
+                identity.nodeId(),
+                identity.registrationEpoch(),
+                identity.placementEpoch(),
+                state
+        );
+        return status;
+    }
+
+    @Override
+    public List<PartitionRuntimeStatus> runtimeStatuses() {
+        return repository.runtimeStatuses();
     }
 }

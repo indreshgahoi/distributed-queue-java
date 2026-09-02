@@ -6,6 +6,7 @@ import io.github.indreshgahoi.queue.metadata.application.port.in.QueueProvisioni
 import io.github.indreshgahoi.queue.metadata.application.port.in.NodeTopologyUseCase;
 import io.github.indreshgahoi.queue.metadata.domain.exception.ProvisioningClaimLostException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.NodeLeaseLostException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.PartitionRuntimeAuthorityLostException;
 import io.github.indreshgahoi.queue.metadata.domain.model.ClaimProvisioningCommand;
 import io.github.indreshgahoi.queue.metadata.domain.model.ProvisioningClaim;
 import io.github.indreshgahoi.queue.metadata.domain.exception.IdempotencyConflictException;
@@ -17,6 +18,8 @@ import io.github.indreshgahoi.queue.metadata.domain.model.QueueLifecycleState;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeRegistration;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeLeaseIdentity;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeIdentity;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -542,6 +545,163 @@ class PostgresQueueMetadataRepositoryTest {
 
             assertEquals(1, claims);
         }
+    }
+
+    @Test
+    void currentRegistrationAndPlacementCanPublishReadyRuntime() {
+        NodeRegistration node = register("node-a");
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        node.nodeId(),
+                        node.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+        provisioning.complete(claim.identity());
+        PartitionRuntimeIdentity identity = runtimeIdentity(queue, node, claim);
+
+        topology.publishRuntimeStatus(
+                identity,
+                PartitionRuntimeState.READY,
+                null
+        );
+
+        assertEquals(1, topology.runtimeStatuses().size());
+        assertEquals(
+                PartitionRuntimeState.READY,
+                topology.runtimeStatuses().getFirst().state()
+        );
+        assertEquals(identity, topology.runtimeStatuses().getFirst().identity());
+    }
+
+    @Test
+    void runtimeDiscoveryReturnsOnlyActivePlacementsForCurrentNode() {
+        NodeRegistration node = register("node-a");
+        catalog.createQueue(command("tenant-a", "orders", "request-1"));
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        node.nodeId(),
+                        node.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+        NodeLeaseIdentity identity = new NodeLeaseIdentity(
+                node.nodeId(),
+                node.registrationEpoch()
+        );
+
+        assertTrue(topology.activePlacements(identity).isEmpty());
+
+        provisioning.complete(claim.identity());
+
+        assertEquals(1, topology.activePlacements(identity).size());
+    }
+
+    @Test
+    void newerRegistrationEpochFencesRuntimePublication() {
+        NodeRegistration first = register("node-a");
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        first.nodeId(),
+                        first.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+        provisioning.complete(claim.identity());
+        topology.register(new RegisterNodeCommand(
+                "node-a",
+                URI.create("http://node-a:8081"),
+                Duration.ofMinutes(5)
+        ));
+
+        assertThrows(
+                PartitionRuntimeAuthorityLostException.class,
+                () -> topology.publishRuntimeStatus(
+                        runtimeIdentity(queue, first, claim),
+                        PartitionRuntimeState.READY,
+                        null
+                )
+        );
+    }
+
+    @Test
+    void changedPlacementEpochFencesRuntimePublication()
+            throws SQLException {
+        NodeRegistration node = register("node-a");
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        node.nodeId(),
+                        node.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+        provisioning.complete(claim.identity());
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    "UPDATE queue_partition_placements "
+                            + "SET placement_epoch = placement_epoch + 1"
+            );
+        }
+
+        assertThrows(
+                PartitionRuntimeAuthorityLostException.class,
+                () -> topology.publishRuntimeStatus(
+                        runtimeIdentity(queue, node, claim),
+                        PartitionRuntimeState.READY,
+                        null
+                )
+        );
+    }
+
+    @Test
+    void expiredNodeLeaseFencesRuntimePublication() {
+        NodeRegistration node = register("node-a");
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        node.nodeId(),
+                        node.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+        provisioning.complete(claim.identity());
+        clock.advance(Duration.ofMinutes(6));
+
+        assertThrows(
+                PartitionRuntimeAuthorityLostException.class,
+                () -> topology.publishRuntimeStatus(
+                        runtimeIdentity(queue, node, claim),
+                        PartitionRuntimeState.FAILED,
+                        "recovery failed"
+                )
+        );
+    }
+
+    private PartitionRuntimeIdentity runtimeIdentity(
+            QueueDescriptor queue,
+            NodeRegistration node,
+            ProvisioningClaim claim
+    ) {
+        return new PartitionRuntimeIdentity(
+                queue.queueId(),
+                queue.generationId(),
+                0,
+                node.nodeId(),
+                node.registrationEpoch(),
+                claim.identity().placementEpoch()
+        );
     }
 
     private NodeRegistration register(String nodeId) {

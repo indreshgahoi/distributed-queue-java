@@ -47,6 +47,10 @@ services:
       NODE_HEARTBEAT_DELAY: PT10S
       PROVISIONING_LEASE_DURATION: PT30S
       PROVISIONING_POLL_DELAY: PT1S
+      RUNTIME_PARTITION_POLL_DELAY: PT1S
+      QUEUE_NODE_PORT: 8081
+    ports:
+      - "8081:8081"
     restart: unless-stopped
     volumes:
       - queue-node-data:/var/lib/distributed-queue

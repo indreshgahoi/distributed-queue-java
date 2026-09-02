@@ -14,12 +14,12 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.19.0 — lease-fenced queue provisioning.
+Latest release: v0.20.0 — durable node registration and partition placement.
 
-Current development: v0.20.0 — durable queue-node registration and partition
-placement. PostgreSQL now identifies live node process incarnations, assigns
-partition zero to one registered node, and verifies registration, placement,
-and provisioning authority before publishing `ACTIVE`.
+Current development: v0.21.0 — fenced runtime partition activation. Queue nodes
+recover `ACTIVE` lineage-bound storage into managed `LocalMessageQueue`
+instances and publish `READY` only while registration and placement authority
+remain current.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
@@ -66,6 +66,10 @@ Repository-wide conventions for architecture, Java formatting, naming,
 testing, logging, durability, API evolution, and review are defined in the
 [engineering guidelines](docs/engineering-guidelines.md).
 
+The v0.21 authority decision and end-to-end lifecycle are captured in
+[ADR 0020](docs/adr/0020-fenced-runtime-partition-activation.md) and the
+[runtime partition lifecycle](docs/diagrams/runtime-partition-lifecycle.md).
+
 ## Roadmap
 
 The roadmap is organized around correctness problems, not feature parity with
@@ -105,26 +109,24 @@ distributed system.
 
 ### Current milestone
 
-**v0.20.0 — Durable node registration and partition placement**
+**v0.21.0 — Fenced runtime partition activation**
 
-Register every queue-node process with a finite lease and monotonically
-increasing registration epoch. PostgreSQL creates one durable partition
-placement on a live least-loaded node. Only that node incarnation may claim
-provisioning, and completion revalidates registration, placement, and claim
-authority.
+Reconcile node-specific `ACTIVE` placements into recovered local queue
+runtimes. Runtime readiness is published through PostgreSQL only after it
+revalidates queue generation, node registration epoch and lease, and placement
+epoch. Losing registration or placement authority closes the local runtime.
 
 ### Next decision area
 
-After v0.20.0, the repository will be reviewed again before selecting a
+After v0.21.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,
   and disk consumption under sustained producer load.
 - **Producer idempotency** — resolve duplicate publication when a producer
   retries after an ambiguous response.
-- **Fenced runtime partition ownership and data-plane API** — safely route
-  message operations to the placed node without treating placement as eternal
-  serving authority.
+- **Routed data-plane API** — resolve queue identity to a `READY` runtime and
+  expose send, receive, ACK, and NACK without bypassing runtime authority.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
@@ -313,6 +315,8 @@ NODE_REGISTRATION_LEASE_DURATION=PT30S
 NODE_HEARTBEAT_DELAY=PT10S
 PROVISIONING_LEASE_DURATION=PT30S
 PROVISIONING_POLL_DELAY=PT1S
+RUNTIME_PARTITION_POLL_DELAY=PT1S
+QUEUE_NODE_PORT=8081
 QUEUE_WAL_SEGMENT_BYTES=16777216
 ```
 
@@ -331,10 +335,23 @@ The queue node uses the trusted, non-customer provisioning endpoints under
 `/internal/v1/provisioning`. They are intentionally unauthenticated for this
 local learning deployment and must not be exposed outside a trusted network.
 Node registration, heartbeat, and topology inspection use `/internal/v1/nodes`
-and `/internal/v1/placements` under the same trust assumption.
+and `/internal/v1/placements` under the same trust assumption. Runtime
+activation uses the fenced node-specific placement and status endpoints; local
+runtime inspection is available from the queue node:
+
+```text
+GET  /internal/v1/nodes/{nodeId}/runtime-placements?registrationEpoch={epoch}
+POST /internal/v1/partitions/{queueId}/{generationId}/{partitionId}/runtime-status
+GET  /internal/v1/runtime/partitions                metadata observation
+GET  http://localhost:8081/internal/v1/runtime/partitions
+                                                     node-local observation
+```
+
 See the [provisioning sequence](docs/diagrams/provisioning-claim-sequence.md)
 and [decision flow](docs/diagrams/provisioning-claim-flow.md) for the complete
-lease and fencing protocol.
+lease and fencing protocol. See the
+[runtime lifecycle](docs/diagrams/runtime-partition-lifecycle.md) for recovery,
+readiness, failure, and deactivation transitions.
 
 `POST` requires an `Idempotency-Key` header and a JSON body such as
 `{"queueName":"orders"}`. It returns `201 Created`, a resource `Location`,

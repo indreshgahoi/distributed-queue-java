@@ -2,6 +2,7 @@ package io.github.indreshgahoi.queue.metadata.adapter.in.web.internal;
 
 import io.github.indreshgahoi.queue.metadata.application.port.in.NodeTopologyUseCase;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeLeaseIdentity;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeIdentity;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/internal/v1")
@@ -68,6 +70,54 @@ class NodeTopologyController {
     List<PartitionPlacementResponse> placements() {
         return topology.placements().stream()
                 .map(PartitionPlacementResponse::from)
+                .toList();
+    }
+
+    @GetMapping("/nodes/{nodeId}/runtime-placements")
+    @Operation(summary = "List ACTIVE placements for a live node incarnation")
+    List<PartitionPlacementResponse> activePlacements(
+            @PathVariable String nodeId,
+            @org.springframework.web.bind.annotation.RequestParam
+            long registrationEpoch
+    ) {
+        return topology.activePlacements(
+                        new NodeLeaseIdentity(nodeId, registrationEpoch)
+                ).stream()
+                .map(PartitionPlacementResponse::from)
+                .toList();
+    }
+
+    @PostMapping(
+            "/partitions/{queueId}/{generationId}/{partitionId}/runtime-status"
+    )
+    @Operation(summary = "Publish fenced partition runtime readiness")
+    PartitionRuntimeStatusResponse publishRuntimeStatus(
+            @PathVariable UUID queueId,
+            @PathVariable UUID generationId,
+            @PathVariable int partitionId,
+            @Valid @RequestBody PublishRuntimeStatusRequest request
+    ) {
+        return PartitionRuntimeStatusResponse.from(
+                topology.publishRuntimeStatus(
+                        new PartitionRuntimeIdentity(
+                                queueId,
+                                generationId,
+                                partitionId,
+                                request.nodeId(),
+                                request.registrationEpoch(),
+                                request.placementEpoch()
+                        ),
+                        request.state(),
+                        request.failureReason()
+                )
+        );
+    }
+
+    @GetMapping("/runtime/partitions")
+    @Operation(summary = "List last published partition runtime states")
+    List<PartitionRuntimeStatusResponse> runtimeStatuses() {
+        return topology.runtimeStatuses().stream()
+                .map(PartitionRuntimeStatusResponse::from)
                 .toList();
     }
 }

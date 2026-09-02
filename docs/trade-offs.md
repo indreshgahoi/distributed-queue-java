@@ -663,3 +663,34 @@ using node ID as a deterministic tie-breaker.
 - runtime ownership leases and message-serving endpoints;
 - replicated storage and recovery-source selection;
 - authenticated node identity and transport security.
+
+## v0.21.0 — Fenced Runtime Partition Activation
+
+### Decision
+
+Recover only node-specific `ACTIVE` placements into managed local queue
+runtimes. Define runtime authority as the composition of queue lineage,
+registration epoch and lease, and placement epoch. Publish `READY` or `FAILED`
+through PostgreSQL only after revalidating every authority dimension.
+
+### Gain
+
+- placement now leads to an observable, recovered runtime;
+- stale process and placement recoveries cannot publish readiness;
+- runtime resources have one owner and deterministic close paths;
+- one recovery failure does not block unrelated partitions;
+- the next data-plane milestone can depend on a tested `READY` boundary.
+
+### Cost
+
+- metadata availability and timely heartbeats gate runtime availability;
+- polling creates bounded authority-change detection delay;
+- runtime status is last-published observation and can outlive its node lease;
+- local activation still cannot make storage movable to another node.
+
+### Deferred
+
+- public message operations and routing;
+- producer idempotency;
+- reassignment, storage transfer, and replication;
+- push notification and large-topology pagination.

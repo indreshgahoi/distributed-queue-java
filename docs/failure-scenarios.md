@@ -1288,3 +1288,66 @@ Required behavior:
     retain the storage side effect as non-authoritative
     reject completion carrying the old registration epoch
     allow only a claim under current registration and placement authority
+
+## F68 — Runtime Recovery Finishes After Registration Changes
+
+A queue opens storage under registration epoch one while a replacement process
+registers at epoch two.
+
+Required behavior:
+
+    reject READY publication from epoch one
+    close the recovered epoch-one runtime
+    never install the stale result in the active runtime map
+
+## F69 — Placement Changes During Runtime Recovery
+
+Recovery starts under placement epoch one and finishes after metadata advances
+the placement epoch.
+
+Required behavior:
+
+    reject publication under placement epoch one
+    close the stale recovered runtime
+    require reconciliation under the current placement
+
+## F70 — Node Registration Is Lost While Serving
+
+Heartbeat failure or lease expiry removes the process incarnation's authority.
+
+Required behavior:
+
+    close every active runtime observed by reconciliation
+    stop reporting those runtimes as locally READY
+    prefer unavailability over serving under ambiguous authority
+
+## F71 — Storage Recovery Fails
+
+Snapshot, WAL, lineage, or filesystem validation prevents a partition from
+recovering.
+
+Required behavior:
+
+    do not install a partial runtime
+    close any resources acquired before failure
+    publish FAILED only if authority is still current
+    continue reconciling unrelated partitions
+
+## F72 — Runtime Reconciliation Is Repeated
+
+The desired placement is unchanged across polling cycles.
+
+Required behavior:
+
+    retain one open LocalMessageQueue instance
+    do not reopen storage or publish duplicate readiness on every poll
+
+## F73 — Placement Exists Before Provisioning Completes
+
+Metadata has selected a node but the queue remains `PROVISIONING`.
+
+Required behavior:
+
+    omit the partition from node-specific runtime placement discovery
+    do not race runtime recovery with storage materialization
+    activate only after fenced provisioning publishes ACTIVE

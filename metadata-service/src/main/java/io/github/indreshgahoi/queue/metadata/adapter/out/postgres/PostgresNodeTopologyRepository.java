@@ -3,9 +3,13 @@ package io.github.indreshgahoi.queue.metadata.adapter.out.postgres;
 import io.github.indreshgahoi.queue.metadata.application.port.out.NodeTopologyRepository;
 import io.github.indreshgahoi.queue.metadata.domain.exception.MetadataUnavailableException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.NodeLeaseLostException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.PartitionRuntimeAuthorityLostException;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeLeaseIdentity;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeRegistration;
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionPlacement;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeIdentity;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeState;
+import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeStatus;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
 import org.springframework.stereotype.Repository;
 
@@ -171,6 +175,185 @@ class PostgresNodeTopologyRepository
         }
     }
 
+    @Override
+    public List<PartitionPlacement> activePlacements(
+            NodeLeaseIdentity identity
+    ) {
+        Objects.requireNonNull(identity, "identity");
+        Instant queriedAt = clock.instant();
+        String sql = """
+                SELECT p.*
+                FROM queue_partition_placements p
+                JOIN queues q
+                  ON q.queue_id = p.queue_id
+                 AND q.generation_id = p.generation_id
+                JOIN queue_nodes n ON n.node_id = p.node_id
+                WHERE p.node_id = ?
+                  AND n.registration_epoch = ?
+                  AND n.lease_expires_at > ?
+                  AND q.lifecycle_state = 'ACTIVE'
+                ORDER BY p.queue_id, p.generation_id, p.partition_id
+                """;
+        String authoritySql = """
+                SELECT 1 FROM queue_nodes
+                WHERE node_id = ?
+                  AND registration_epoch = ?
+                  AND lease_expires_at > ?
+                """;
+        try (Connection connection = dataSource.getConnection()) {
+            // An empty placement list is valid, but an empty result caused by
+            // stale authority must be distinguishable so the node fails closed.
+            try (PreparedStatement authority =
+                         connection.prepareStatement(authoritySql)) {
+                authority.setString(1, identity.nodeId());
+                authority.setLong(2, identity.registrationEpoch());
+                authority.setTimestamp(3, Timestamp.from(queriedAt));
+                try (ResultSet resultSet = authority.executeQuery()) {
+                    if (!resultSet.next()) {
+                        throw new NodeLeaseLostException();
+                    }
+                }
+            }
+            try (PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
+                statement.setString(1, identity.nodeId());
+                statement.setLong(2, identity.registrationEpoch());
+                statement.setTimestamp(3, Timestamp.from(queriedAt));
+                try (ResultSet resultSet = statement.executeQuery()) {
+                    List<PartitionPlacement> placements = new ArrayList<>();
+                    while (resultSet.next()) {
+                        placements.add(mapPlacement(resultSet));
+                    }
+                    return List.copyOf(placements);
+                }
+            }
+        } catch (SQLException e) {
+            throw databaseFailure("list active partition placements", e);
+        }
+    }
+
+    @Override
+    public PartitionRuntimeStatus publishRuntimeStatus(
+            PartitionRuntimeIdentity identity,
+            PartitionRuntimeState state,
+            String failureReason
+    ) {
+        Objects.requireNonNull(identity, "identity");
+        Objects.requireNonNull(state, "state");
+        Instant publishedAt = clock.instant();
+        String sql = """
+                INSERT INTO queue_partition_runtime_status (
+                    queue_id,
+                    generation_id,
+                    partition_id,
+                    node_id,
+                    registration_epoch,
+                    placement_epoch,
+                    runtime_state,
+                    failure_reason,
+                    updated_at
+                )
+                SELECT p.queue_id, p.generation_id, p.partition_id,
+                       p.node_id, n.registration_epoch,
+                       p.placement_epoch, ?, ?, ?
+                FROM queue_partition_placements p
+                JOIN queue_nodes n ON n.node_id = p.node_id
+                JOIN queues q
+                  ON q.queue_id = p.queue_id
+                 AND q.generation_id = p.generation_id
+                WHERE p.queue_id = ?
+                  AND p.generation_id = ?
+                  AND p.partition_id = ?
+                  AND p.node_id = ?
+                  AND p.placement_epoch = ?
+                  AND n.registration_epoch = ?
+                  AND n.lease_expires_at > ?
+                  AND q.lifecycle_state = 'ACTIVE'
+                ON CONFLICT (queue_id, generation_id, partition_id)
+                DO UPDATE SET
+                    node_id = EXCLUDED.node_id,
+                    registration_epoch = EXCLUDED.registration_epoch,
+                    placement_epoch = EXCLUDED.placement_epoch,
+                    runtime_state = EXCLUDED.runtime_state,
+                    failure_reason = EXCLUDED.failure_reason,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING *
+                """;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, state.name());
+            statement.setString(2, failureReason);
+            statement.setTimestamp(3, Timestamp.from(publishedAt));
+            statement.setObject(4, identity.queueId());
+            statement.setObject(5, identity.generationId());
+            statement.setInt(6, identity.partitionId());
+            statement.setString(7, identity.nodeId());
+            statement.setLong(8, identity.placementEpoch());
+            statement.setLong(9, identity.registrationEpoch());
+            statement.setTimestamp(10, Timestamp.from(publishedAt));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new PartitionRuntimeAuthorityLostException();
+                }
+                return mapRuntimeStatus(resultSet);
+            }
+        } catch (SQLException e) {
+            throw databaseFailure("publish partition runtime status", e);
+        }
+    }
+
+    @Override
+    public List<PartitionRuntimeStatus> runtimeStatuses() {
+        String sql = """
+                SELECT *
+                FROM queue_partition_runtime_status
+                ORDER BY queue_id, generation_id, partition_id
+                """;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet resultSet = statement.executeQuery()) {
+            List<PartitionRuntimeStatus> statuses = new ArrayList<>();
+            while (resultSet.next()) {
+                statuses.add(mapRuntimeStatus(resultSet));
+            }
+            return List.copyOf(statuses);
+        } catch (SQLException e) {
+            throw databaseFailure("list partition runtime statuses", e);
+        }
+    }
+
+    private PartitionRuntimeStatus mapRuntimeStatus(ResultSet resultSet)
+            throws SQLException {
+        PartitionRuntimeIdentity identity = new PartitionRuntimeIdentity(
+                resultSet.getObject("queue_id", java.util.UUID.class),
+                resultSet.getObject("generation_id", java.util.UUID.class),
+                resultSet.getInt("partition_id"),
+                resultSet.getString("node_id"),
+                resultSet.getLong("registration_epoch"),
+                resultSet.getLong("placement_epoch")
+        );
+        return new PartitionRuntimeStatus(
+                identity,
+                PartitionRuntimeState.valueOf(
+                        resultSet.getString("runtime_state")
+                ),
+                resultSet.getString("failure_reason"),
+                resultSet.getTimestamp("updated_at").toInstant()
+        );
+    }
+
+    private PartitionPlacement mapPlacement(ResultSet resultSet)
+            throws SQLException {
+        return new PartitionPlacement(
+                resultSet.getObject("queue_id", java.util.UUID.class),
+                resultSet.getObject("generation_id", java.util.UUID.class),
+                resultSet.getInt("partition_id"),
+                resultSet.getString("node_id"),
+                resultSet.getLong("placement_epoch"),
+                resultSet.getLong("metadata_version")
+        );
+    }
+
     private NodeRegistration mapNode(ResultSet resultSet)
             throws SQLException {
         return new NodeRegistration(
@@ -193,4 +376,3 @@ class PostgresNodeTopologyRepository
         );
     }
 }
-

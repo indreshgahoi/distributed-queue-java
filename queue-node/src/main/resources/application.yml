@@ -2,7 +2,10 @@ spring:
   application:
     name: queue-node
   main:
-    web-application-type: none
+    web-application-type: servlet
+
+server:
+  port: ${QUEUE_NODE_PORT:8081}
 
 queue:
   node:
@@ -14,4 +17,5 @@ queue:
     heartbeat-delay: ${NODE_HEARTBEAT_DELAY:PT10S}
     lease-duration: ${PROVISIONING_LEASE_DURATION:PT30S}
     poll-delay: ${PROVISIONING_POLL_DELAY:PT1S}
+    runtime-poll-delay: ${RUNTIME_PARTITION_POLL_DELAY:PT1S}
     wal-segment-bytes: ${QUEUE_WAL_SEGMENT_BYTES:16777216}

@@ -10,3 +10,5 @@ ordering, authority, or failure handling.
 - [Node registration and placement flow](node-registration-placement-flow.md) —
   process-incarnation fencing, heartbeat renewal, initial placement, and
   placement-aware provisioning.
+- [Runtime partition lifecycle](runtime-partition-lifecycle.md) — durable queue
+  progression, fenced recovery, readiness publication, and deactivation.
