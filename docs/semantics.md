@@ -2450,3 +2450,50 @@ It does not change queue behavior, durability authority, delivery semantics,
 runtime admission, or any public API. Benchmark scores are observations from a
 recorded machine and workload, not queue guarantees or service-level
 objectives. The authoritative v0.22.0 guarantees remain G201–G207 above.
+
+## v0.23.0 — Per-Partition Runtime Admission
+
+### G208 — Runtime admission is partition-scoped
+
+Each installed runtime owns its lifecycle state and active-operation count.
+An operation on one partition does not hold the manager lifecycle monitor or
+another partition's admission lock while executing queue or WAL work.
+
+### G209 — Same-partition operation and closure remain ordered
+
+Permit acquisition and transition from `READY` to `CLOSING` are mutually
+exclusive under the handle-local lifecycle lock. If acquisition wins, closure
+waits for that permit to drain. If closing wins, acquisition is rejected and
+does not invoke the queue.
+
+### G210 — Removing an index entry is not the admission fence
+
+Deactivation both conditionally removes the exact handle from the concurrent
+serving index and closes the handle's admission gate. A request that read the
+handle immediately before removal must still acquire a permit and therefore
+cannot use a `CLOSING` or `CLOSED` runtime.
+
+### G211 — Authority is fixed at successful admission
+
+An operation admitted while the runtime is READY and its matching registration
+epoch and lease are current may finish if authority is subsequently withdrawn.
+Withdrawal rejects new permits and waits for admitted work; it does not report
+failure merely because an already-admitted mutation completed durably.
+
+### G212 — Permits are released on every operation outcome
+
+Successful return and runtime exceptions both release the active-operation
+count. Closure cannot remain blocked solely because a callback failed.
+
+### G213 — Runtime close is idempotent within the process
+
+Concurrent close attempts result in exactly one call to the underlying
+`RuntimeQueue.close()`. Other close callers wait for the same terminal
+`CLOSED` state.
+
+### Explicit non-guarantees
+
+v0.23 does not guarantee fair admission, a bounded drain deadline, cancellation
+of an admitted operation, parallel reconciliation, or concurrent mutation
+inside one `LocalMessageQueue`. Replication, reassignment, stable routing,
+producer idempotency, and admission control remain deferred.

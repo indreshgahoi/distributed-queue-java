@@ -133,6 +133,57 @@ class QueueDataPlaneServiceTest {
     }
 
     @Test
+    void deactivatingBlockedQueueDoesNotBlockOperationOnAnotherQueue()
+            throws Exception {
+        UUID secondQueueId = UUID.randomUUID();
+        BlockingRuntimeQueue blockedQueue = new BlockingRuntimeQueue();
+        TestRuntimeQueue independentQueue = new TestRuntimeQueue();
+        PartitionPlacement secondPlacement = placement(secondQueueId);
+        TestTopology topology = new TestTopology(List.of(
+                placement(),
+                secondPlacement
+        ));
+        RuntimePartitionManager manager = manager(
+                new MutableRegistration(),
+                topology,
+                placement -> placement.queueId().equals(QUEUE_ID)
+                        ? blockedQueue
+                        : independentQueue
+        );
+        manager.runOnce();
+        QueueDataPlaneService service = new QueueDataPlaneService(manager);
+
+        try (ExecutorService executor =
+                     Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<String> blockedPublish = executor.submit(
+                    () -> service.publish(QUEUE_ID, "slow")
+            );
+            assertTrue(blockedQueue.entered.await(5, TimeUnit.SECONDS));
+
+            topology.placements = List.of(secondPlacement);
+            topology.blockNextQuery = true;
+            Future<?> reconcile = executor.submit(manager::runOnce);
+            assertTrue(topology.queryEntered.await(5, TimeUnit.SECONDS));
+
+            Future<String> independentPublish = executor.submit(
+                    () -> service.publish(secondQueueId, "independent")
+            );
+            assertEquals(
+                    "message-1",
+                    independentPublish.get(5, TimeUnit.SECONDS)
+            );
+
+            topology.releaseQuery.countDown();
+            blockedQueue.release.countDown();
+            assertEquals(
+                    "message-1",
+                    blockedPublish.get(5, TimeUnit.SECONDS)
+            );
+            reconcile.get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void negativeNackDelayIsRejectedBeforeRuntimeMutation() {
         TestRuntimeQueue queue = new TestRuntimeQueue();
         QueueDataPlaneService service = new QueueDataPlaneService(
@@ -179,8 +230,12 @@ class QueueDataPlaneServiceTest {
     }
 
     private PartitionPlacement placement() {
+        return placement(QUEUE_ID);
+    }
+
+    private PartitionPlacement placement(UUID queueId) {
         return new PartitionPlacement(
-                QUEUE_ID,
+                queueId,
                 UUID.randomUUID(),
                 0,
                 "node-a",
@@ -202,12 +257,34 @@ class QueueDataPlaneServiceTest {
         }
     }
 
-    private record TestTopology(List<PartitionPlacement> placements)
+    private static final class TestTopology
             implements RuntimeTopologyClient {
+        private volatile List<PartitionPlacement> placements;
+        private volatile boolean blockNextQuery;
+        private final CountDownLatch queryEntered = new CountDownLatch(1);
+        private final CountDownLatch releaseQuery = new CountDownLatch(1);
+
+        private TestTopology(List<PartitionPlacement> placements) {
+            this.placements = placements;
+        }
+
         @Override
         public List<PartitionPlacement> activePlacements(
                 NodeRegistration registration
         ) {
+            if (blockNextQuery) {
+                queryEntered.countDown();
+                try {
+                    if (!releaseQuery.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException(
+                                "topology query release timed out"
+                        );
+                    }
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(exception);
+                }
+            }
             return placements;
         }
 

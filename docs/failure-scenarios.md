@@ -1420,3 +1420,47 @@ Required behavior:
     return succeeded=false
     preserve the current delivery
     do not translate a stale receipt into a server failure
+
+## F80 — Slow WAL on One Queue Blocks Another Queue
+
+A durable operation on queue A stalls in filesystem force while a client
+addresses queue B on the same node.
+
+Required behavior:
+
+    queue B acquires its own runtime permit and proceeds independently
+    queue A retains its existing durability and operation ordering
+    do not hold the manager lifecycle monitor across either queue operation
+
+## F81 — Request Retains a Handle During Concurrent Removal
+
+A request reads a READY handle immediately before reconciliation removes it
+from the serving index and begins closure.
+
+Required behavior:
+
+    require handle-local permit acquisition after lookup
+    reject the request if the handle became CLOSING first
+    if permit acquisition won first, drain it before closing the queue
+
+## F82 — Admitted Operation Throws
+
+A queue callback fails after acquiring a runtime permit.
+
+Required behavior:
+
+    release the permit on the exceptional path
+    preserve the original operation exception
+    allow later deactivation to drain and close the runtime
+
+## F83 — Concurrent Runtime Close Attempts
+
+Request-time authority rejection and reconciliation concurrently attempt to
+close the same runtime handle.
+
+Required behavior:
+
+    stop new admission once
+    wait for the same active-operation count to reach zero
+    invoke RuntimeQueue.close exactly once
+    converge on CLOSED without exposing the stale handle again

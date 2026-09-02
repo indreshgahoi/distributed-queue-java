@@ -770,3 +770,37 @@ capacity certification.
 - controlled storage-device and WAL concurrency experiments;
 - profiling-guided lifecycle-lock redesign;
 - soak, recovery-time, and capacity benchmarks.
+
+## v0.23.0 — Per-Partition Runtime Admission and Draining
+
+### Decision
+
+Replace the node-wide data-plane monitor with one lifecycle handle per active
+partition. Use a concurrent serving index, handle-local state and operation
+count, and an `AutoCloseable` permit. Keep reconciliation serialized while
+allowing queue callbacks to run outside manager and handle locks.
+
+### Gain
+
+- isolates unrelated queues from another partition's slow WAL operation;
+- preserves an explicit same-partition operation-versus-close order;
+- rejects stale references through handle state, not map visibility alone;
+- makes active-operation draining observable in the concurrency model;
+- creates a natural boundary for later per-partition admission limits.
+
+### Cost
+
+- introduces lifecycle state and reference accounting that must remain balanced;
+- shutdown may wait indefinitely for an admitted operation that never returns;
+- a concurrent serving index and synchronized lifecycle map have different
+  responsibilities that reviewers must understand;
+- operations targeting the same local queue remain serialized by the queue;
+- reconciliation and runtime recovery remain node-wide serialized work.
+
+### Deferred
+
+- bounded drain timeout and forced cancellation policy;
+- per-partition metrics for active permits and drain duration;
+- parallel or capacity-limited recovery scheduling;
+- queue-depth, byte, and request admission control;
+- distributed ownership transfer and replicated storage.

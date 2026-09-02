@@ -14,12 +14,14 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.22.0 — authority-guarded node-local data plane.
+Latest release: v0.22.1 — reproducible performance baseline.
 
-Current development: v0.22.1 — reproducible performance baseline. JMH
-benchmarks measure local state-machine cost, forced-WAL durability cost, the
-durable receive/ACK cycle, and queue-node runtime admission at different active
-queue counts. Raw results and their execution context remain in the repository.
+Current development: v0.23.0 — per-partition runtime admission and draining.
+Queue operations no longer hold a node-wide lifecycle monitor during storage
+I/O. Each active partition owns its admission count and close protocol, so an
+unrelated queue can continue while another partition drains.
+The focused benchmark and raw results are retained in
+[`docs/benchmarks/v0.23.0`](docs/benchmarks/v0.23.0/README.md).
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
@@ -73,6 +75,9 @@ The v0.21 authority decision and end-to-end lifecycle are captured in
 The v0.22 request/closure ordering decision is captured in
 [ADR 0021](docs/adr/0021-authority-guarded-node-local-data-plane.md) and the
 [data-plane operation lifecycle](docs/diagrams/data-plane-operation-lifecycle.md).
+The v0.23 lock-scope decision is captured in
+[ADR 0022](docs/adr/0022-per-partition-runtime-admission.md) and the
+[per-partition runtime lifecycle](docs/diagrams/per-partition-runtime-lifecycle.md).
 
 ## Roadmap
 
@@ -113,20 +118,22 @@ distributed system.
 12. **Fenced runtime activation** — queue nodes recover only authoritative
     `ACTIVE` placements, publish readiness through PostgreSQL fencing, and
     close runtimes when process authority is lost.
+13. **Authority-guarded data plane and baseline** — HTTP queue operations enter
+    only through READY runtime authority, use constant-time lookup, and have a
+    checked-in JMH baseline separating queue and forced-WAL costs.
 
 ### Current milestone
 
-**v0.22.1 — Reproducible performance baseline**
+**v0.23.0 — Per-partition runtime admission and draining**
 
-Establish measured latency and throughput baselines before changing the
-v0.22 data-plane locking or durability path. Separate queue-engine overhead
-from synchronous WAL cost, verify that READY lookup remains independent of
-active queue count, expose node-wide admission contention, and keep raw JMH
-evidence in [`docs/benchmarks/v0.22.1`](docs/benchmarks/v0.22.1/README.md).
+Replace node-wide data-plane serialization with explicit per-partition
+`READY` → `CLOSING` → `CLOSED` handles. New work is rejected after closing
+begins, admitted work drains before queue close, and unrelated queues continue
+without waiting for another partition's WAL or lifecycle transition.
 
 ### Next decision area
 
-After v0.22.1, the repository will be reviewed again before selecting a
+After v0.23.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,

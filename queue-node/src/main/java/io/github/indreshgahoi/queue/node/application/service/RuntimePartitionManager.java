@@ -15,7 +15,6 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,13 +22,22 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 
 /**
- * Reconciles PostgreSQL's desired placement state with open local queue
- * runtimes. The manager deliberately revalidates authority after recovery:
- * opening a WAL can be slow, and a result produced under an old registration
- * or placement must be closed rather than becoming visible as READY.
+ * Owns the boundary between desired control-plane placement and locally
+ * serviceable queue runtimes.
+ *
+ * <p>The manager monitor serializes reconciliation and lifecycle-map changes.
+ * Each {@link RuntimePartitionHandle} separately orders data-plane admission
+ * against closure for one partition. Queue operations therefore never hold
+ * the manager monitor while performing storage I/O.
+ *
+ * <p>Recovery and closure may be slow. Authority is revalidated before a
+ * recovered runtime becomes discoverable, and admitted operations drain before
+ * its queue is closed.
  */
 @Slf4j
 public final class RuntimePartitionManager
@@ -39,9 +47,17 @@ public final class RuntimePartitionManager
     private final NodeRegistrationProvider registrations;
     private final RuntimeTopologyClient topology;
     private final RuntimeQueueFactory queues;
-    private final Map<PartitionKey, ActivePartition> active = new HashMap<>();
-    private final Map<UUID, PartitionKey> servingKeyByQueueId =
+
+    // Lifecycle truth. Read and written only while holding the manager monitor.
+    private final Map<PartitionKey, RuntimePartitionHandle> active =
             new HashMap<>();
+
+    // Request index. Reads are lock-free; lifecycle writers still hold the
+    // manager monitor and expose only fully installed handles.
+    private final ConcurrentMap<UUID, RuntimePartitionHandle> servingByQueueId =
+            new ConcurrentHashMap<>();
+
+    // Last activation failure for a desired partition that is not READY.
     private final Map<PartitionKey, RuntimePartitionView> failures =
             new HashMap<>();
 
@@ -62,10 +78,15 @@ public final class RuntimePartitionManager
         this.queues = Objects.requireNonNull(queues, "queues");
     }
 
+    /**
+     * Reconciles one control-plane observation. Reconciliation is serialized,
+     * but data-plane operations use partition handles and continue
+     * independently.
+     */
     @Override
     public synchronized void runOnce() {
-        Optional<NodeRegistration> current = currentLiveRegistration();
-        if (current.isEmpty()) {
+        Optional<NodeRegistration> registration = currentLiveRegistration();
+        if (registration.isEmpty()) {
             // A local runtime is useful only while its process incarnation is
             // authoritative. Fail closed instead of serving during ambiguity.
             deactivateAll("registration authority unavailable");
@@ -73,19 +94,7 @@ public final class RuntimePartitionManager
             return;
         }
 
-        NodeRegistration registration = current.orElseThrow();
-        Map<PartitionKey, DesiredPartition> desired = desiredPartitions(
-                topology.activePlacements(registration),
-                registration
-        );
-        deactivateSuperseded(desired);
-        desired.forEach((key, partition) -> {
-            ActivePartition existing = active.get(key);
-            if (existing == null
-                    || !existing.identity().equals(partition.identity())) {
-                activate(key, partition);
-            }
-        });
+        reconcile(registration.orElseThrow());
     }
 
     public synchronized List<RuntimePartitionView> partitions() {
@@ -107,35 +116,62 @@ public final class RuntimePartitionManager
     }
 
     /**
-     * Executes against a READY runtime while holding the same monitor used by
-     * reconciliation and shutdown. Consequently either the operation enters
-     * first and closure waits, or deactivation enters first and the operation
-     * is rejected. There is no interval in which a caller can retain a queue
-     * reference after its placement authority has been withdrawn locally.
+     * Executes through a permit owned by the addressed runtime partition.
+     * Admission and closure of that partition are strictly ordered, but the
+     * queue operation does not hold the manager monitor or another partition's
+     * lifecycle lock while it performs storage I/O.
      */
-    public synchronized <T> T withReadyQueue(
+    public <T> T withReadyQueue(
             UUID queueId,
             Function<RuntimeQueue, T> operation
     ) {
         Objects.requireNonNull(queueId, "queueId");
         Objects.requireNonNull(operation, "operation");
-        PartitionKey key = servingKeyByQueueId.get(queueId);
-        ActivePartition partition = key == null ? null : active.get(key);
-        if (partition == null) {
+        RuntimePartitionHandle handle = servingByQueueId.get(queueId);
+        if (handle == null) {
             throw new RuntimePartitionUnavailableException(queueId);
         }
-        boolean registrationStillAuthoritative = currentLiveRegistration()
-                .filter(registration -> registration.registrationEpoch()
-                        == partition.identity().registrationEpoch())
-                .isPresent();
-        if (!registrationStillAuthoritative) {
-            deactivate(
-                    PartitionKey.from(partition.identity()),
-                    "registration authority unavailable at request admission"
-            );
-            throw new RuntimePartitionUnavailableException(queueId);
+
+        RuntimePartitionHandle.Admission admission = handle.tryAcquire()
+                .orElseThrow(
+                        () -> new RuntimePartitionUnavailableException(queueId)
+                );
+        try (admission) {
+            if (hasCurrentProcessAuthority(handle.identity())) {
+                return operation.apply(admission.queue());
+            }
+
+            // A request may be the first observer of lease expiry. Close the
+            // gate while this permit is still counted so no later request can
+            // enter before lifecycle reconciliation catches up.
+            handle.beginClosing();
         }
-        return operation.apply(partition.queue());
+        deactivateIfCurrent(
+                handle,
+                "registration authority unavailable at request admission"
+        );
+        throw new RuntimePartitionUnavailableException(queueId);
+    }
+
+    private void reconcile(NodeRegistration registration) {
+        Map<PartitionKey, DesiredPartition> desired = desiredPartitions(
+                topology.activePlacements(registration),
+                registration
+        );
+        deactivateSuperseded(desired);
+        activateMissing(desired);
+    }
+
+    private void activateMissing(
+            Map<PartitionKey, DesiredPartition> desired
+    ) {
+        desired.forEach((key, wanted) -> {
+            RuntimePartitionHandle existing = active.get(key);
+            if (existing == null
+                    || !existing.identity().equals(wanted.identity())) {
+                activate(key, wanted);
+            }
+        });
     }
 
     private Map<PartitionKey, DesiredPartition> desiredPartitions(
@@ -143,113 +179,130 @@ public final class RuntimePartitionManager
             NodeRegistration registration
     ) {
         Map<PartitionKey, DesiredPartition> desired = new HashMap<>();
-        placements.stream()
-                .filter(placement -> nodeId.equals(placement.nodeId()))
-                .forEach(placement -> {
-                    RuntimePartitionIdentity identity =
-                            RuntimePartitionIdentity.from(
-                                    placement,
-                                    registration
-                            );
-                    desired.put(
-                            PartitionKey.from(identity),
-                            new DesiredPartition(placement, identity)
-                    );
-                });
+        for (PartitionPlacement placement : placements) {
+            RuntimePartitionIdentity identity = RuntimePartitionIdentity.from(
+                    placement,
+                    registration
+            );
+            desired.put(
+                    PartitionKey.from(identity),
+                    new DesiredPartition(placement, identity)
+            );
+        }
         return desired;
     }
 
     private void deactivateSuperseded(
             Map<PartitionKey, DesiredPartition> desired
     ) {
-        List<PartitionKey> stale = new ArrayList<>();
-        active.forEach((key, partition) -> {
-            DesiredPartition wanted = desired.get(key);
-            if (wanted == null
-                    || !partition.identity().equals(wanted.identity())) {
-                stale.add(key);
-            }
-        });
-        stale.forEach(key -> deactivate(key, "authority superseded"));
+        List<PartitionKey> staleKeys = active.entrySet().stream()
+                .filter(entry -> isSuperseded(entry, desired))
+                .map(Map.Entry::getKey)
+                .toList();
+        closeRemovedPartitions(staleKeys, "authority superseded");
         failures.keySet().removeIf(key -> !desired.containsKey(key));
+    }
+
+    private boolean isSuperseded(
+            Map.Entry<PartitionKey, RuntimePartitionHandle> activeEntry,
+            Map<PartitionKey, DesiredPartition> desired
+    ) {
+        DesiredPartition wanted = desired.get(activeEntry.getKey());
+        return wanted == null
+                || !activeEntry.getValue().identity().equals(wanted.identity());
+    }
+
+    private void closeRemovedPartitions(
+            List<PartitionKey> keys,
+            String reason
+    ) {
+        // Close every gate before the first drain wait. One stuck operation
+        // must not leave another stale runtime accepting new work.
+        List<RuntimePartitionHandle> removed = keys.stream()
+                .map(this::removeAndBeginClosing)
+                .filter(Objects::nonNull)
+                .toList();
+        removed.forEach(handle -> closeAndLog(handle, reason));
     }
 
     private void activate(
             PartitionKey key,
             DesiredPartition desired
     ) {
-        RuntimeQueue queue = null;
+        RuntimeQueue recoveredQueue = null;
         try {
-            queue = queues.open(desired.placement());
+            recoveredQueue = queues.open(desired.placement());
+            if (!publishReadyWhileCurrent(desired.identity())) {
+                closeQuietly(recoveredQueue);
+                return;
+            }
 
-            // Recovery completed asynchronously relative to control-plane
-            // changes. Check locally, then let PostgreSQL perform the final
-            // atomic authority validation while publishing READY.
-            if (!stillCurrent(desired.identity())) {
-                closeQuietly(queue);
-                return;
-            }
-            topology.publishStatus(
-                    desired.identity(),
-                    RuntimePartitionState.READY,
-                    null
-            );
-            if (!stillCurrent(desired.identity())) {
-                closeQuietly(queue);
-                return;
-            }
-            ActivePartition activated = new ActivePartition(
-                    desired.identity(),
-                    queue
-            );
-            ActivePartition previousActive = active.put(key, activated);
-            // v0.22 supports exactly one partition and one active generation
-            // per queue. This secondary serving index keeps the request path
-            // O(1), while the lineage-keyed map remains authoritative for
-            // reconciliation and supersession.
-            PartitionKey previousServingKey = servingKeyByQueueId.put(
-                    desired.identity().queueId(),
-                    key
-            );
-            if (previousActive != null || previousServingKey != null) {
-                if (previousActive == null) {
-                    active.remove(key);
-                } else {
-                    active.put(key, previousActive);
-                }
-                if (previousServingKey == null) {
-                    servingKeyByQueueId.remove(
-                            desired.identity().queueId()
-                    );
-                } else {
-                    servingKeyByQueueId.put(
-                            desired.identity().queueId(),
-                            previousServingKey
-                    );
-                }
-                throw new IllegalStateException(
-                        "multiple active runtimes for queue "
-                                + desired.identity().queueId()
-                );
-            }
-            failures.remove(key);
-            log.info(
-                    "event=runtime_partition_activated queueId={} "
-                            + "generationId={} partitionId={} nodeId={} "
-                            + "registrationEpoch={} placementEpoch={}",
-                    desired.identity().queueId(),
-                    desired.identity().generationId(),
-                    desired.identity().partitionId(),
-                    desired.identity().nodeId(),
-                    desired.identity().registrationEpoch(),
-                    desired.identity().placementEpoch()
+            install(
+                    key,
+                    new RuntimePartitionHandle(
+                            desired.identity(),
+                            recoveredQueue
+                    )
             );
         } catch (RuntimeException failure) {
-            if (queue != null) {
-                closeQuietly(queue);
+            if (recoveredQueue != null) {
+                closeQuietly(recoveredQueue);
             }
             recordFailure(key, desired.identity(), failure);
+            return;
         }
+
+        failures.remove(key);
+        logActivated(desired.identity());
+    }
+
+    private boolean publishReadyWhileCurrent(
+            RuntimePartitionIdentity identity
+    ) {
+        // Recovery can outlive the authority that started it. Check before
+        // publication, let PostgreSQL fence publication atomically, then check
+        // again before making the runtime locally discoverable.
+        if (!hasCurrentProcessAuthority(identity)) {
+            return false;
+        }
+        topology.publishStatus(
+                identity,
+                RuntimePartitionState.READY,
+                null
+        );
+        return hasCurrentProcessAuthority(identity);
+    }
+
+    private void install(
+            PartitionKey key,
+            RuntimePartitionHandle activated
+    ) {
+        UUID queueId = activated.identity().queueId();
+        if (active.containsKey(key) || servingByQueueId.containsKey(queueId)) {
+            activated.beginClosing();
+            throw new IllegalStateException(
+                    "multiple active runtimes for queue " + queueId
+            );
+        }
+
+        // All writers hold the manager monitor. Publish to the concurrent
+        // request index last, after the lifecycle map owns the complete handle.
+        active.put(key, activated);
+        servingByQueueId.put(queueId, activated);
+    }
+
+    private void logActivated(RuntimePartitionIdentity identity) {
+        log.info(
+                "event=runtime_partition_activated queueId={} "
+                        + "generationId={} partitionId={} nodeId={} "
+                        + "registrationEpoch={} placementEpoch={}",
+                identity.queueId(),
+                identity.generationId(),
+                identity.partitionId(),
+                identity.nodeId(),
+                identity.registrationEpoch(),
+                identity.placementEpoch()
+        );
     }
 
     private void recordFailure(
@@ -270,7 +323,7 @@ public final class RuntimePartitionManager
                         reason
                 )
         );
-        if (stillCurrent(identity)) {
+        if (hasCurrentProcessAuthority(identity)) {
             try {
                 topology.publishStatus(
                         identity,
@@ -302,7 +355,9 @@ public final class RuntimePartitionManager
         );
     }
 
-    private boolean stillCurrent(RuntimePartitionIdentity identity) {
+    private boolean hasCurrentProcessAuthority(
+            RuntimePartitionIdentity identity
+    ) {
         return currentLiveRegistration()
                 .filter(registration -> nodeId.equals(identity.nodeId()))
                 .filter(registration -> registration.registrationEpoch()
@@ -316,16 +371,24 @@ public final class RuntimePartitionManager
                         .isAfter(clock.instant()));
     }
 
-    private void deactivate(PartitionKey key, String reason) {
-        ActivePartition removed = active.remove(key);
+    private RuntimePartitionHandle removeAndBeginClosing(PartitionKey key) {
+        RuntimePartitionHandle removed = active.remove(key);
         if (removed == null) {
-            return;
+            return null;
         }
-        servingKeyByQueueId.remove(
+        servingByQueueId.remove(
                 removed.identity().queueId(),
-                key
+                removed
         );
-        closeQuietly(removed.queue());
+        removed.beginClosing();
+        return removed;
+    }
+
+    private void closeAndLog(
+            RuntimePartitionHandle removed,
+            String reason
+    ) {
+        closeQuietly(removed);
         log.info(
                 "event=runtime_partition_deactivated queueId={} "
                         + "generationId={} partitionId={} reason={}",
@@ -336,15 +399,27 @@ public final class RuntimePartitionManager
         );
     }
 
-    private void deactivateAll(String reason) {
-        List<PartitionKey> keys = List.copyOf(active.keySet());
-        keys.forEach(key -> deactivate(key, reason));
+    private synchronized void deactivateIfCurrent(
+            RuntimePartitionHandle handle,
+            String reason
+    ) {
+        PartitionKey key = PartitionKey.from(handle.identity());
+        if (active.get(key) != handle) {
+            closeQuietly(handle);
+            return;
+        }
+        RuntimePartitionHandle removed = removeAndBeginClosing(key);
+        closeAndLog(removed, reason);
     }
 
-    private void closeQuietly(RuntimeQueue queue) {
+    private void deactivateAll(String reason) {
+        closeRemovedPartitions(List.copyOf(active.keySet()), reason);
+    }
+
+    private void closeQuietly(AutoCloseable closeable) {
         try {
-            queue.close();
-        } catch (RuntimeException failure) {
+            closeable.close();
+        } catch (Exception failure) {
             log.warn("event=runtime_partition_close_failed", failure);
         }
     }
@@ -359,12 +434,6 @@ public final class RuntimePartitionManager
     private record DesiredPartition(
             PartitionPlacement placement,
             RuntimePartitionIdentity identity
-    ) {
-    }
-
-    private record ActivePartition(
-            RuntimePartitionIdentity identity,
-            RuntimeQueue queue
     ) {
     }
 

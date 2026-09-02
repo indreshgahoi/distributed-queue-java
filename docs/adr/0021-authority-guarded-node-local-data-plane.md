@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted for v0.22.0.
+Accepted for v0.22.0. The node-wide monitor decision is superseded by
+[ADR 0022](0022-per-partition-runtime-admission.md) in v0.23.0; the guarded
+callback and admission-time authority decisions remain in force.
 
 ## Context
 

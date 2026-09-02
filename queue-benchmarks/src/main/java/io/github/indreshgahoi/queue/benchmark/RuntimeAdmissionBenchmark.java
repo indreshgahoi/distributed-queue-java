@@ -21,6 +21,7 @@ import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
+import org.openjdk.jmh.infra.ThreadParams;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -47,12 +48,17 @@ public class RuntimeAdmissionBenchmark {
     @Benchmark
     public void readyQueueLookup(
             BenchmarkState state,
-            Blackhole blackhole
+            Blackhole blackhole,
+            ThreadParams thread
     ) {
-        // A no-op callback isolates serving-index lookup and lifecycle-guard
-        // admission from the cost of the queue operation performed afterward.
+        // Spread workers over independent handles when the topology permits.
+        // The 1-versus-1000 comparison therefore exposes whether an admission
+        // mechanism accidentally serializes unrelated runtime partitions.
+        UUID queueId = state.queueIds.get(
+                thread.getThreadIndex() % state.queueIds.size()
+        );
         blackhole.consume(state.manager.withReadyQueue(
-                state.targetQueueId,
+                queueId,
                 IDENTITY
         ));
     }
@@ -63,7 +69,7 @@ public class RuntimeAdmissionBenchmark {
         private int activeQueueCount;
 
         private RuntimePartitionManager manager;
-        private UUID targetQueueId;
+        private List<UUID> queueIds;
 
         @Setup
         public void setUp() {
@@ -73,11 +79,10 @@ public class RuntimeAdmissionBenchmark {
                     NOW.plus(Duration.ofDays(1))
             );
             List<PartitionPlacement> placements = new ArrayList<>();
+            queueIds = new ArrayList<>();
             for (int index = 0; index < activeQueueCount; index++) {
                 UUID queueId = UUID.randomUUID();
-                if (index == activeQueueCount / 2) {
-                    targetQueueId = queueId;
-                }
+                queueIds.add(queueId);
                 placements.add(new PartitionPlacement(
                         queueId,
                         UUID.randomUUID(),

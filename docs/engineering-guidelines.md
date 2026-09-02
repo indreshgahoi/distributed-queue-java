@@ -32,6 +32,11 @@ feature without deriving why this system needs it.
   durability authority. Do not blur this boundary.
 - Keep transactions short. Never hold a database transaction across network or
   filesystem operations.
+- Scope synchronization to the state and authority it protects. Do not hold a
+  node-wide coordinator lock across queue or filesystem I/O when partitions
+  have independent lifecycle and failure ownership.
+- When draining multiple resources after process-wide authority loss, close all
+  admission gates before waiting for any one resource to finish.
 - Introduce a dependency only when its benefit exceeds its operational,
   security, build, and maintenance cost.
 - Preserve package-private visibility for implementation details and test seams.
