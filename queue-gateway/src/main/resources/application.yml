@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: queue-gateway
+
+server:
+  port: ${QUEUE_GATEWAY_PORT:8082}
+
+queue:
+  gateway:
+    metadata-base-url: ${METADATA_SERVICE_URL:http://localhost:8080}
+    connect-timeout: ${GATEWAY_CONNECT_TIMEOUT:PT2S}
+    request-timeout: ${GATEWAY_REQUEST_TIMEOUT:PT10S}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

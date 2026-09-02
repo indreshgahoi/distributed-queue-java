@@ -7,9 +7,11 @@ import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeIdenti
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeState;
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeStatus;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.QueueRoute;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.UUID;
 
 public interface NodeTopologyUseCase {
     NodeRegistration register(RegisterNodeCommand command);
@@ -34,4 +36,6 @@ public interface NodeTopologyUseCase {
     );
 
     List<PartitionRuntimeStatus> runtimeStatuses();
+
+    QueueRoute resolveReadyRoute(UUID queueId);
 }

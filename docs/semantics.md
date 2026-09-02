@@ -2540,3 +2540,52 @@ v0.24 does not reserve filesystem space, measure WAL/snapshot/frame overhead,
 provide tenant-wide quotas, guarantee producer fairness, expose dynamic
 per-queue limits from metadata, or remove dead-letter messages. These limits
 bound logical retained payload, not complete physical storage consumption.
+
+## v0.25.0 — Stable Data-Plane Routing Gateway
+
+### G219 — Customer operations use a stable gateway endpoint
+
+The gateway accepts the existing publish, receive, ACK, and NACK resource paths
+without requiring customers to discover or address a queue node. Physical node
+endpoints remain internal routing data.
+
+### G220 — A route requires complete current authority
+
+Metadata returns a route only when the queue is ACTIVE and its current
+generation, partition placement, live node registration, and READY runtime
+status agree on queue, generation, partition, node, placement epoch, and
+registration epoch. An unknown queue is distinct from a known queue without a
+READY route.
+
+### G221 — Route resolution does not grant storage authority
+
+The route is an observation that may become stale immediately. The selected
+queue node performs its existing READY-handle and registration admission before
+invoking the local queue. A stale route cannot force a node to execute work.
+
+### G222 — Each operation has one downstream attempt
+
+The gateway resolves once and forwards once. It does not automatically retry,
+re-resolve, or forward to another node after a transport failure because a
+mutation may already have committed to the WAL. A 502 response can therefore
+represent an ambiguous operation result.
+
+### G223 — Downstream queue semantics survive forwarding
+
+The gateway preserves the queue node's status, response content type, body, and
+public resource Location. Empty receive remains 204, payload rejection remains
+413, retained-capacity rejection remains 429, and node-side authority rejection
+remains 503.
+
+### G224 — Gateway network waits are bounded
+
+Metadata resolution and node forwarding use configured positive connect and
+request timeouts. Exhausting a timeout never triggers an implicit mutation
+retry.
+
+### Explicit non-guarantees
+
+v0.25 does not cache routes, remain available when metadata is unavailable,
+retry operations, provide exactly-once publication, transfer ownership,
+balance replicas, route message keys across partitions, authenticate internal
+services, or replicate queue storage.

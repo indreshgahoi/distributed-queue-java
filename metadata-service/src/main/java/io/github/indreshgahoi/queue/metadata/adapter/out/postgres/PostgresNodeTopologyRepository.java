@@ -4,6 +4,8 @@ import io.github.indreshgahoi.queue.metadata.application.port.out.NodeTopologyRe
 import io.github.indreshgahoi.queue.metadata.domain.exception.MetadataUnavailableException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.NodeLeaseLostException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.PartitionRuntimeAuthorityLostException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.QueueNotFoundException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.QueueRouteUnavailableException;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeLeaseIdentity;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeRegistration;
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionPlacement;
@@ -11,6 +13,7 @@ import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeIdenti
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeState;
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeStatus;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.QueueRoute;
 import org.springframework.stereotype.Repository;
 
 import javax.sql.DataSource;
@@ -26,6 +29,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 @Repository
 class PostgresNodeTopologyRepository
@@ -319,6 +323,68 @@ class PostgresNodeTopologyRepository
             return List.copyOf(statuses);
         } catch (SQLException e) {
             throw databaseFailure("list partition runtime statuses", e);
+        }
+    }
+
+    @Override
+    public QueueRoute resolveReadyRoute(UUID queueId) {
+        Objects.requireNonNull(queueId, "queueId");
+        Instant resolvedAt = clock.instant();
+        String sql = """
+                SELECT q.lifecycle_state,
+                       q.generation_id AS queue_generation_id,
+                       p.partition_id,
+                       p.node_id,
+                       p.placement_epoch,
+                       n.endpoint,
+                       n.registration_epoch,
+                       s.runtime_state
+                FROM queues q
+                LEFT JOIN queue_partition_placements p
+                  ON p.queue_id = q.queue_id
+                 AND p.generation_id = q.generation_id
+                 AND p.partition_id = 0
+                LEFT JOIN queue_nodes n
+                  ON n.node_id = p.node_id
+                 AND n.lease_expires_at > ?
+                LEFT JOIN queue_partition_runtime_status s
+                  ON s.queue_id = p.queue_id
+                 AND s.generation_id = p.generation_id
+                 AND s.partition_id = p.partition_id
+                 AND s.node_id = p.node_id
+                 AND s.placement_epoch = p.placement_epoch
+                 AND s.registration_epoch = n.registration_epoch
+                 AND s.runtime_state = 'READY'
+                WHERE q.queue_id = ?
+                """;
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setTimestamp(1, Timestamp.from(resolvedAt));
+            statement.setObject(2, queueId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new QueueNotFoundException(queueId);
+                }
+                if (!"ACTIVE".equals(
+                        resultSet.getString("lifecycle_state")
+                ) || resultSet.getString("runtime_state") == null) {
+                    throw new QueueRouteUnavailableException(queueId);
+                }
+                return new QueueRoute(
+                        queueId,
+                        resultSet.getObject(
+                                "queue_generation_id",
+                                UUID.class
+                        ),
+                        resultSet.getInt("partition_id"),
+                        resultSet.getString("node_id"),
+                        URI.create(resultSet.getString("endpoint")),
+                        resultSet.getLong("placement_epoch"),
+                        resultSet.getLong("registration_epoch")
+                );
+            }
+        } catch (SQLException e) {
+            throw databaseFailure("resolve READY queue route", e);
         }
     }
 

@@ -58,6 +58,24 @@ services:
     volumes:
       - queue-node-data:/var/lib/distributed-queue
 
+  queue-gateway:
+    build:
+      context: .
+      dockerfile: queue-gateway/Dockerfile
+    depends_on:
+      metadata-service:
+        condition: service_started
+      queue-node:
+        condition: service_started
+    environment:
+      METADATA_SERVICE_URL: http://metadata-service:8080
+      QUEUE_GATEWAY_PORT: 8082
+      GATEWAY_CONNECT_TIMEOUT: PT2S
+      GATEWAY_REQUEST_TIMEOUT: PT10S
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+
 volumes:
   queue-metadata-postgres:
   queue-node-data:

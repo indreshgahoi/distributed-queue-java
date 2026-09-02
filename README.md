@@ -14,22 +14,24 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.22.1 — reproducible performance baseline.
+Latest release: v0.24.0 — bounded retained-message admission.
 
-Current development: v0.24.0 — bounded retained-message admission. Each local
-partition rejects oversized payloads and publications that would exceed its
-retained message or payload-byte budget before writing to the WAL. Capacity is
-released only by a durable ACK and is reconstructed during recovery.
+Current development: v0.25.0 — stable data-plane routing gateway. Customers
+use one gateway address while metadata resolves the currently authoritative
+READY node. The gateway forwards each operation once, preserves node responses,
+and never hides ambiguous mutation outcomes behind an automatic retry.
 
-The implementation remains a single-node/local queue engine. Networking,
-replication, partition ownership, and leader election are not yet included.
+Each queue partition remains a single-copy local engine, now reached through a
+network gateway and metadata-backed placement. Ownership transfer,
+multi-partition routing, replication, and leader election are not yet included.
 
-The Maven build has four modules and two independently deployable services:
+The Maven build has five modules and three independently deployable services:
 
 ```text
 queue-core        durable local queue engine and storage state machine
 metadata-service Spring Boot control-plane service and PostgreSQL repository
 queue-node        Spring Boot reconciliation worker and local storage adapter
+queue-gateway     Spring Boot stable customer routing and forwarding service
 queue-benchmarks  JMH microbenchmarks and an executable benchmark artifact
 ```
 
@@ -55,6 +57,24 @@ Domain types and ports are deliberate public contracts. Controllers,
 application-service implementations, persistence implementations, and their
 constructors remain package-private so callers cannot bypass those contracts.
 
+The gateway follows the same dependency direction while keeping transport
+forwarding outside its routing policy:
+
+```text
+gateway
+├── domain
+│   ├── model
+│   └── exception
+├── application
+│   ├── port.in
+│   ├── port.out
+│   └── service
+├── adapter
+│   ├── in.web
+│   └── out.http
+└── QueueGatewayApplication     Spring Boot composition root
+```
+
 ## Design Principles
 
 - Define guarantees before implementation.
@@ -79,6 +99,10 @@ The v0.23 lock-scope decision is captured in
 The v0.24 admission boundary is captured in
 [ADR 0023](docs/adr/0023-bounded-retained-message-admission.md) and the
 [bounded admission lifecycle](docs/diagrams/bounded-admission-lifecycle.md).
+The v0.25 routing decision is captured in
+[ADR 0024](docs/adr/0024-stable-data-plane-routing-gateway.md), the
+[routing sequence](docs/diagrams/stable-routing-sequence.md), and the
+[routing decision flow](docs/diagrams/stable-routing-flow.md).
 
 ## Roadmap
 
@@ -126,25 +150,27 @@ distributed system.
 14. **Partition-scoped lifecycle concurrency** — per-partition admission
     permits order operations against draining and closure without holding a
     node-wide lock during storage I/O.
+15. **Bounded retained-message admission** — message and retained-state limits
+    reject overload before WAL mutation and survive recovery.
 
 ### Current milestone
 
-**v0.24.0 — Bounded retained-message admission**
+**v0.25.0 — Stable data-plane routing gateway**
 
-Reject oversized messages and publications that would exceed a partition's
-retained count or UTF-8 payload-byte budget. Admission is atomic with publish,
-rejection is mutation-free, durable ACK releases capacity, and recovery
-reconstructs counters without changing the WAL or snapshot formats.
+Resolve queue identity to a fully fenced READY node and forward customer
+operations through a stable gateway address. Preserve downstream semantics,
+bound network waits, and prohibit automatic retry after ambiguous mutation
+failure.
 
 ### Next decision area
 
-After v0.24.0, the repository will be reviewed again before selecting a
+After v0.25.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Producer idempotency** — add a durable deduplication contract for ambiguous
   publish responses now that a real network retry boundary exists.
-- **Stable routing endpoint** — resolve queue identity to its currently READY
-  node without making customers discover placement metadata themselves.
+- **Bounded route caching** — remove PostgreSQL from every request while making
+  staleness and invalidation behavior explicit.
 - **Admission observability and tenant quotas** — expose saturation and evolve
   node defaults into metadata-managed resource policy.
 
@@ -153,10 +179,9 @@ failure exposure, operational need, and distributed-systems learning value.
 
 ### Deliberately later
 
-Networking, partitioning, ownership transfer, leader election, replication,
-and quorum durability come only after the local durability and storage
-lifecycle contracts are explicit and tested. These phases will introduce the
-distributed concerns of fencing, partial failure, split brain, replica lag,
+Partitioning, ownership transfer, leader election, replication, and quorum
+durability come only after the local durability and storage lifecycle contracts
+are explicit and tested. These phases will introduce split brain, replica lag,
 and recovery-source authority rather than merely adding remote APIs.
 
 ## Metadata Service
@@ -167,7 +192,7 @@ and recovery-source authority rather than merely adding remote APIs.
 
 - Docker Engine or Docker Desktop;
 - Docker Compose v2 (`docker compose version`);
-- ports `5432` and `8080` available locally.
+- ports `5432`, `8080`, `8081`, and `8082` available locally.
 
 All commands below run from the repository root.
 
@@ -200,8 +225,8 @@ Check container state:
 docker compose ps
 ```
 
-`postgres` should report `healthy`; `metadata-service` and `queue-node` should
-report `Up`.
+`postgres` should report `healthy`; `metadata-service`, `queue-node`, and
+`queue-gateway` should report `Up`.
 Then verify the application health endpoint:
 
 ```bash
@@ -341,6 +366,9 @@ QUEUE_WAL_SEGMENT_BYTES=16777216
 QUEUE_MAX_MESSAGE_BYTES=262144
 QUEUE_MAX_RETAINED_MESSAGES=100000
 QUEUE_MAX_RETAINED_BYTES=1073741824
+QUEUE_GATEWAY_PORT=8082
+GATEWAY_CONNECT_TIMEOUT=PT2S
+GATEWAY_REQUEST_TIMEOUT=PT10S
 ```
 
 Flyway applies versioned schema migrations before the service becomes ready.
@@ -370,9 +398,10 @@ GET  http://localhost:8081/internal/v1/runtime/partitions
                                                      node-local observation
 ```
 
-Customer message operations currently target the node that owns the queue's
-single partition. Queue-node Swagger UI is available at
-`http://localhost:8081/swagger-ui.html`.
+Customer message operations use the stable queue gateway at
+`http://localhost:8082`. Gateway Swagger UI is available at
+`http://localhost:8082/swagger-ui.html`; queue-node Swagger remains available
+at `http://localhost:8081/swagger-ui.html` for trusted internal diagnosis.
 
 ```text
 POST /v1/queues/{queueId}/messages
@@ -383,11 +412,12 @@ POST /v1/queues/{queueId}/messages/{receiptHandle}/nack
 
 Publish accepts `{"payload":"process-order-123"}`. NACK accepts an ISO-8601
 duration such as `{"retryDelay":"PT30S"}`. An empty receive returns `204 No
-Content`; a node without a currently READY runtime returns `503 Service
+Content`; a queue without a currently READY route returns `503 Service
 Unavailable`. Oversized payloads return `413 Payload Too Large`; exhausted
 retained count or byte capacity returns `429 Too Many Requests`. Both publish
-rejections occur before WAL append. v0.24 deliberately does not provide a
-stable router, so callers must use the assigned node endpoint.
+rejections occur before WAL append. The gateway makes one metadata lookup and
+one node call per operation; it never automatically retries an ambiguous
+mutation.
 
 See the [provisioning sequence](docs/diagrams/provisioning-claim-sequence.md)
 and [decision flow](docs/diagrams/provisioning-claim-flow.md) for the complete

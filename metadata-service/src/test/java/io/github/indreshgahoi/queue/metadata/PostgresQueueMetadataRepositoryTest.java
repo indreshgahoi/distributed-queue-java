@@ -11,10 +11,13 @@ import io.github.indreshgahoi.queue.metadata.domain.model.ClaimProvisioningComma
 import io.github.indreshgahoi.queue.metadata.domain.model.ProvisioningClaim;
 import io.github.indreshgahoi.queue.metadata.domain.exception.IdempotencyConflictException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueAlreadyExistsException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.QueueNotFoundException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.QueueRouteUnavailableException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.StaleQueueMetadataException;
 import io.github.indreshgahoi.queue.metadata.domain.model.CreateQueueCommand;
 import io.github.indreshgahoi.queue.metadata.domain.model.QueueDescriptor;
 import io.github.indreshgahoi.queue.metadata.domain.model.QueueLifecycleState;
+import io.github.indreshgahoi.queue.metadata.domain.model.QueueRoute;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeRegistration;
 import io.github.indreshgahoi.queue.metadata.domain.model.NodeLeaseIdentity;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
@@ -575,6 +578,69 @@ class PostgresQueueMetadataRepositoryTest {
                 topology.runtimeStatuses().getFirst().state()
         );
         assertEquals(identity, topology.runtimeStatuses().getFirst().identity());
+
+        QueueRoute route = topology.resolveReadyRoute(queue.queueId());
+        assertEquals(queue.generationId(), route.generationId());
+        assertEquals(node.nodeId(), route.nodeId());
+        assertEquals(URI.create("http://node-a:8081"), route.nodeEndpoint());
+        assertEquals(identity.placementEpoch(), route.placementEpoch());
+        assertEquals(identity.registrationEpoch(), route.registrationEpoch());
+    }
+
+    @Test
+    void routeIsUnavailableUntilRuntimePublishesReady() {
+        NodeRegistration node = register("node-a");
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        node.nodeId(),
+                        node.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+        provisioning.complete(claim.identity());
+
+        assertThrows(
+                QueueRouteUnavailableException.class,
+                () -> topology.resolveReadyRoute(queue.queueId())
+        );
+    }
+
+    @Test
+    void newerNodeRegistrationInvalidatesPreviouslyReadyRoute() {
+        NodeRegistration node = register("node-a");
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        node.nodeId(),
+                        node.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+        provisioning.complete(claim.identity());
+        topology.publishRuntimeStatus(
+                runtimeIdentity(queue, node, claim),
+                PartitionRuntimeState.READY,
+                null
+        );
+        register("node-a");
+
+        assertThrows(
+                QueueRouteUnavailableException.class,
+                () -> topology.resolveReadyRoute(queue.queueId())
+        );
+    }
+
+    @Test
+    void routeResolutionDistinguishesUnknownQueue() {
+        assertThrows(
+                QueueNotFoundException.class,
+                () -> topology.resolveReadyRoute(java.util.UUID.randomUUID())
+        );
     }
 
     @Test

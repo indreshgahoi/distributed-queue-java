@@ -1507,3 +1507,54 @@ Required behavior:
     below recovered logical usage
     reject new publishes until durable ACKs restore capacity
     keep delivery and acknowledgement available for draining
+
+## F88 — Runtime Is Not READY During Route Resolution
+
+A queue exists but provisioning, recovery, or activation has not produced a
+runtime status matching the current placement and node registration epochs.
+
+Required behavior:
+
+    return no route and 503
+    do not forward to the placement based on placement alone
+
+## F89 — Node Lease Expires After READY Publication
+
+The last runtime status is READY but its node registration lease has expired.
+
+Required behavior:
+
+    exclude the stale runtime in the metadata route query
+    return 503 until a current process publishes matching readiness
+
+## F90 — Route Becomes Stale Before Forwarding
+
+Metadata returns a route, then authority changes before the request reaches the
+selected node.
+
+Required behavior:
+
+    let the queue node perform final local admission
+    preserve its 503 rejection
+    do not automatically replay the operation elsewhere
+
+## F91 — Publish Commits but Gateway Loses the Node Response
+
+The selected node durably appends PUBLISH but the connection fails before the
+gateway receives its response.
+
+Required behavior:
+
+    return 502 as an ambiguous result
+    make no second node call
+    make no second metadata resolution
+
+## F92 — Metadata Is Unavailable to the Gateway
+
+The gateway cannot complete authoritative route resolution within its bounded
+network timeout.
+
+Required behavior:
+
+    return 503 routing-metadata-unavailable
+    do not guess a node or use an unvalidated fallback route

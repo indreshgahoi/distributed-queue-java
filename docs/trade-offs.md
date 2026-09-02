@@ -840,3 +840,37 @@ rebuild counters from recovered logical state.
 - request-rate limiting, fairness, and producer-specific quotas;
 - DLQ inspection and deletion APIs;
 - admission metrics and dynamic configuration changes.
+
+## v0.25.0 — Stable Data-Plane Routing Gateway
+
+### Decision
+
+Add a separate hexagonal Spring Boot gateway. Resolve a fully fenced READY
+route from metadata for every operation, forward once, preserve the node
+response, and surface transport ambiguity without retry.
+
+### Gain
+
+- customers use stable queue URLs independent of node placement;
+- route authority is derived from one coherent PostgreSQL statement;
+- metadata, routing, and durable execution retain separate ownership;
+- downstream capacity, empty-queue, receipt, and availability semantics remain
+  visible through the gateway;
+- the code creates the routing seam required before ownership transfer and
+  replication.
+
+### Cost
+
+- every operation adds a metadata HTTP call and PostgreSQL query;
+- metadata-service availability and latency are now on this uncached path;
+- forwarding adds a network hop and preserves ambiguous mutation outcomes;
+- the gateway becomes another deployable service to operate;
+- direct queue-node endpoints still exist inside the trusted network.
+
+### Deferred
+
+- bounded route caching and invalidation;
+- safe retry policies and producer idempotency;
+- authentication, authorization, TLS, and endpoint allow-listing;
+- partition-key routing and multi-partition queues;
+- ownership transfer, replicated logs, and leader-aware routing.

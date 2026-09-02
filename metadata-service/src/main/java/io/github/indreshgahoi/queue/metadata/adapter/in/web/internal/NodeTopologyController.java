@@ -120,4 +120,10 @@ class NodeTopologyController {
                 .map(PartitionRuntimeStatusResponse::from)
                 .toList();
     }
+
+    @GetMapping("/routes/queues/{queueId}")
+    @Operation(summary = "Resolve the authoritative READY route for a queue")
+    QueueRouteResponse resolveReadyRoute(@PathVariable UUID queueId) {
+        return QueueRouteResponse.from(topology.resolveReadyRoute(queueId));
+    }
 }

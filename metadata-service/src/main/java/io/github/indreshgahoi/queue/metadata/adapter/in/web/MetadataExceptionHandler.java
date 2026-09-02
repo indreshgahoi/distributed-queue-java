@@ -5,6 +5,7 @@ import io.github.indreshgahoi.queue.metadata.domain.exception.MetadataUnavailabl
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueAlreadyExistsException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueMetadataException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueNotFoundException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.QueueRouteUnavailableException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.StaleQueueMetadataException;
 import jakarta.validation.ConstraintViolationException;
 import org.springframework.http.HttpStatus;
@@ -27,6 +28,17 @@ final class MetadataExceptionHandler {
         return problem(
                 HttpStatus.NOT_FOUND,
                 "queue-not-found",
+                exception.getMessage()
+        );
+    }
+
+    @ExceptionHandler(QueueRouteUnavailableException.class)
+    ResponseEntity<ProblemDetail> routeUnavailable(
+            QueueRouteUnavailableException exception
+    ) {
+        return problem(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "queue-route-unavailable",
                 exception.getMessage()
         );
     }

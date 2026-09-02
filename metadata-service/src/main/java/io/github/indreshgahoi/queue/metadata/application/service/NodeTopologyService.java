@@ -9,12 +9,14 @@ import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeIdenti
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeState;
 import io.github.indreshgahoi.queue.metadata.domain.model.PartitionRuntimeStatus;
 import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
+import io.github.indreshgahoi.queue.metadata.domain.model.QueueRoute;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 @Service
 @Slf4j
@@ -105,5 +107,12 @@ final class NodeTopologyService implements NodeTopologyUseCase {
     @Override
     public List<PartitionRuntimeStatus> runtimeStatuses() {
         return repository.runtimeStatuses();
+    }
+
+    @Override
+    public QueueRoute resolveReadyRoute(UUID queueId) {
+        return repository.resolveReadyRoute(
+                Objects.requireNonNull(queueId, "queueId")
+        );
     }
 }
