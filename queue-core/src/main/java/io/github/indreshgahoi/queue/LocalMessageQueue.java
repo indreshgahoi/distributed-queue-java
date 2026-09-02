@@ -22,6 +22,7 @@ import io.github.indreshgahoi.queue.storage.wal.WriteAheadLog;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
@@ -57,6 +58,8 @@ public final class LocalMessageQueue
     private final QueueConfiguration config;
     private final WriteAheadLog wal;
     private final Optional<QueueSnapshotStore> snapshotStore;
+    private int retainedMessages;
+    private long retainedPayloadBytes;
 
     /*
      * Convenience constructor.
@@ -185,9 +188,19 @@ public final class LocalMessageQueue
                 "payload"
         );
 
+        int payloadBytes = payload.getBytes(StandardCharsets.UTF_8).length;
+        if (payloadBytes > config.maxMessageBytes()) {
+            throw new MessageTooLargeException(
+                    payloadBytes,
+                    config.maxMessageBytes()
+            );
+        }
+
         lock.lock();
 
         try {
+            requirePublishCapacity(payloadBytes);
+
             String messageId =
                     UUID.randomUUID().toString();
 
@@ -224,6 +237,8 @@ public final class LocalMessageQueue
                             1
                     )
             );
+            retainedMessages++;
+            retainedPayloadBytes += payloadBytes;
 
             return messageId;
 
@@ -328,6 +343,8 @@ public final class LocalMessageQueue
             );
 
             inFlightByReceiptHandle.remove(receiptHandle);
+            retainedMessages--;
+            retainedPayloadBytes -= payloadBytes(inFlight.message());
 
             return true;
 
@@ -664,6 +681,33 @@ public final class LocalMessageQueue
         );
 
         materializeRecoveredState(states);
+        restoreCapacityAccounting(states);
+    }
+
+    private void requirePublishCapacity(int payloadBytes) {
+        if (retainedMessages >= config.maxRetainedMessages()) {
+            throw new QueueCapacityExceededException("retained message count");
+        }
+        if (retainedPayloadBytes
+                > config.maxRetainedBytes() - payloadBytes) {
+            throw new QueueCapacityExceededException("retained payload bytes");
+        }
+    }
+
+    private void restoreCapacityAccounting(
+            Map<String, RecoveryState> states
+    ) {
+        for (RecoveryState state : states.values()) {
+            if (state.status() == RecoveryStatus.DONE) {
+                continue;
+            }
+            retainedMessages++;
+            retainedPayloadBytes += payloadBytes(state.message());
+        }
+    }
+
+    private int payloadBytes(Message message) {
+        return message.payload().getBytes(StandardCharsets.UTF_8).length;
     }
 
     private void applyWalRecords(

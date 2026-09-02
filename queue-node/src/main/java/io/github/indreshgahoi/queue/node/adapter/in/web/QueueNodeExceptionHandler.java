@@ -1,5 +1,7 @@
 package io.github.indreshgahoi.queue.node.adapter.in.web;
 
+import io.github.indreshgahoi.queue.MessageTooLargeException;
+import io.github.indreshgahoi.queue.QueueCapacityExceededException;
 import io.github.indreshgahoi.queue.node.domain.exception.RuntimePartitionUnavailableException;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
@@ -24,6 +26,28 @@ final class QueueNodeExceptionHandler {
         return problem(
                 HttpStatus.SERVICE_UNAVAILABLE,
                 "runtime-partition-unavailable",
+                exception.getMessage()
+        );
+    }
+
+    @ExceptionHandler(MessageTooLargeException.class)
+    ResponseEntity<ProblemDetail> messageTooLarge(
+            MessageTooLargeException exception
+    ) {
+        return problem(
+                HttpStatus.PAYLOAD_TOO_LARGE,
+                "message-too-large",
+                exception.getMessage()
+        );
+    }
+
+    @ExceptionHandler(QueueCapacityExceededException.class)
+    ResponseEntity<ProblemDetail> capacityExceeded(
+            QueueCapacityExceededException exception
+    ) {
+        return problem(
+                HttpStatus.TOO_MANY_REQUESTS,
+                "queue-capacity-exceeded",
                 exception.getMessage()
         );
     }

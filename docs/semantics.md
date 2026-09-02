@@ -2497,3 +2497,46 @@ v0.23 does not guarantee fair admission, a bounded drain deadline, cancellation
 of an admitted operation, parallel reconciliation, or concurrent mutation
 inside one `LocalMessageQueue`. Replication, reassignment, stable routing,
 producer idempotency, and admission control remain deferred.
+
+## v0.24.0 — Bounded Retained-Message Admission
+
+### G214 — Oversized payload rejection is mutation-free
+
+Payload size is its UTF-8 encoded byte length. A payload larger than the
+configured per-message limit is rejected before message identity allocation,
+WAL append, or in-memory mutation.
+
+### G215 — Aggregate capacity admission is atomic with publication
+
+Retained-message count and payload-byte limits are checked while holding the
+same queue mutation lock used by publication. A publish that would exceed
+either limit is rejected before WAL append. Concurrent publishers cannot both
+consume the same remaining capacity.
+
+### G216 — Capacity follows logical message retention
+
+READY, IN_FLIGHT, DELAYED, and DEAD_LETTER states consume one retained-message
+unit and the payload's UTF-8 byte length. Transitions among those states neither
+consume nor release capacity. A successfully persisted ACK is the only v0.24
+transition that releases capacity.
+
+### G217 — Recovery reconstructs admission state
+
+Retained count and bytes are derived after snapshot restoration and WAL suffix
+replay. DONE messages do not consume capacity. Recovery is permitted when
+restored usage exceeds current configuration so consumers can drain the
+queue, but subsequent publication is rejected until capacity is available.
+
+### G218 — Capacity failures are distinguishable
+
+The queue node returns `413 Payload Too Large` for the immutable per-message
+limit and `429 Too Many Requests` for aggregate retained-capacity exhaustion.
+Both responses use stable Problem Detail type identifiers and mean that no
+message was published.
+
+### Explicit non-guarantees
+
+v0.24 does not reserve filesystem space, measure WAL/snapshot/frame overhead,
+provide tenant-wide quotas, guarantee producer fairness, expose dynamic
+per-queue limits from metadata, or remove dead-letter messages. These limits
+bound logical retained payload, not complete physical storage consumption.

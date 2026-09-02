@@ -14,7 +14,7 @@ FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 COPY --from=build \
-    /workspace/metadata-service/target/metadata-service-0.23.0-SNAPSHOT.jar \
+    /workspace/metadata-service/target/metadata-service-0.24.0-SNAPSHOT.jar \
     metadata-service.jar
 
 EXPOSE 8080

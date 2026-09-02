@@ -14,7 +14,7 @@ FROM eclipse-temurin:21-jre
 
 WORKDIR /app
 COPY --from=build \
-    /workspace/queue-node/target/queue-node-0.23.0-SNAPSHOT-exec.jar \
+    /workspace/queue-node/target/queue-node-0.24.0-SNAPSHOT-exec.jar \
     queue-node.jar
 
 ENTRYPOINT ["java", "-jar", "/app/queue-node.jar"]

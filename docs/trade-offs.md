@@ -804,3 +804,39 @@ allowing queue callbacks to run outside manager and handle locks.
 - parallel or capacity-limited recovery scheduling;
 - queue-depth, byte, and request admission control;
 - distributed ownership transfer and replicated storage.
+
+## v0.24.0 — Bounded Retained-Message Admission
+
+### Decision
+
+Reject a publish before WAL append when its UTF-8 payload exceeds the message
+limit or when accepting it would exceed the partition's retained-message or
+retained-payload-byte limit. Count every non-ACKed state, including DLQ, and
+rebuild counters from recovered logical state.
+
+### Gain
+
+- overload becomes an explicit, retryable API outcome rather than incidental
+  heap or WAL failure;
+- checks and accounting are atomic under the existing queue mutation lock;
+- rejected publishes leave no durable or volatile trace;
+- recovery preserves admission behavior without changing snapshot or WAL
+  formats;
+- an operator can lower limits and still start the queue to drain it.
+
+### Cost
+
+- UTF-8 length calculation allocates an encoded byte array on every publish;
+- logical payload bytes underestimate actual heap and filesystem consumption;
+- global node configuration gives every queue the same limits;
+- DLQ messages permanently consume capacity until removal is implemented;
+- HTTP 429 communicates backpressure but cannot provide an accurate
+  `Retry-After` time because release depends on consumer acknowledgements.
+
+### Deferred
+
+- per-tenant and metadata-managed per-queue quotas;
+- filesystem free-space reservation and emergency disk thresholds;
+- request-rate limiting, fairness, and producer-specific quotas;
+- DLQ inspection and deletion APIs;
+- admission metrics and dynamic configuration changes.

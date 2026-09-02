@@ -1,5 +1,7 @@
 package io.github.indreshgahoi.queue.node.adapter.in.web;
 
+import io.github.indreshgahoi.queue.MessageTooLargeException;
+import io.github.indreshgahoi.queue.QueueCapacityExceededException;
 import io.github.indreshgahoi.queue.node.application.port.in.QueueDataPlaneUseCase;
 import io.github.indreshgahoi.queue.node.domain.exception.RuntimePartitionUnavailableException;
 import io.github.indreshgahoi.queue.node.domain.model.MessageDelivery;
@@ -114,13 +116,46 @@ class QueueDataPlaneControllerTest {
                 ));
     }
 
+    @Test
+    void oversizedMessageUsesPayloadTooLargeProblemDetail() throws Exception {
+        dataPlane.publishFailure = new MessageTooLargeException(6, 5);
+
+        mvc.perform(post("/v1/queues/{queueId}/messages", queueId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"payload\":\"123456\"}"))
+                .andExpect(status().isPayloadTooLarge())
+                .andExpect(jsonPath("$.type").value(
+                        "urn:distributed-queue:message-too-large"
+                ));
+    }
+
+    @Test
+    void exhaustedCapacityUsesTooManyRequestsProblemDetail()
+            throws Exception {
+        dataPlane.publishFailure = new QueueCapacityExceededException(
+                "retained message count"
+        );
+
+        mvc.perform(post("/v1/queues/{queueId}/messages", queueId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"payload\":\"message\"}"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.type").value(
+                        "urn:distributed-queue:queue-capacity-exceeded"
+                ));
+    }
+
     private final class FakeDataPlane implements QueueDataPlaneUseCase {
         private Optional<MessageDelivery> delivery = Optional.empty();
         private boolean available = true;
+        private RuntimeException publishFailure;
 
         @Override
         public String publish(UUID ignored, String payload) {
             requireAvailable();
+            if (publishFailure != null) {
+                throw publishFailure;
+            }
             return "message-1";
         }
 

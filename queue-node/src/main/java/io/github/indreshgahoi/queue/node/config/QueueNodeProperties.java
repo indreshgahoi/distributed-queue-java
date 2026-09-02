@@ -19,6 +19,9 @@ public record QueueNodeProperties(
         @NotNull Path storageRoot,
         @NotNull Duration registrationLeaseDuration,
         @NotNull Duration leaseDuration,
-        @Positive long walSegmentBytes
+        @Positive long walSegmentBytes,
+        @Positive int maxMessageBytes,
+        @Positive int maxRetainedMessages,
+        @Positive long maxRetainedBytes
 ) {
 }

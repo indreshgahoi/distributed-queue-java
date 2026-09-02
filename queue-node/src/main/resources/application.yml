@@ -19,3 +19,6 @@ queue:
     poll-delay: ${PROVISIONING_POLL_DELAY:PT1S}
     runtime-poll-delay: ${RUNTIME_PARTITION_POLL_DELAY:PT1S}
     wal-segment-bytes: ${QUEUE_WAL_SEGMENT_BYTES:16777216}
+    max-message-bytes: ${QUEUE_MAX_MESSAGE_BYTES:262144}
+    max-retained-messages: ${QUEUE_MAX_RETAINED_MESSAGES:100000}
+    max-retained-bytes: ${QUEUE_MAX_RETAINED_BYTES:1073741824}

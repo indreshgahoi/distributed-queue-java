@@ -3,6 +3,8 @@ package io.github.indreshgahoi.queue.node.adapter.in.web;
 import io.github.indreshgahoi.queue.node.application.port.in.QueueDataPlaneUseCase;
 import io.github.indreshgahoi.queue.node.domain.model.MessageDelivery;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.Valid;
@@ -28,7 +30,26 @@ final class QueueDataPlaneController {
     }
 
     @PostMapping
-    @Operation(summary = "Publish a message to a local READY queue runtime")
+    @Operation(
+            summary = "Publish a message to a local READY queue runtime",
+            description = "Admission checks UTF-8 payload size and retained "
+                    + "partition capacity before writing to the WAL."
+    )
+    @ApiResponses({
+            @ApiResponse(responseCode = "201", description = "Published"),
+            @ApiResponse(
+                    responseCode = "413",
+                    description = "Payload exceeds the message byte limit"
+            ),
+            @ApiResponse(
+                    responseCode = "429",
+                    description = "Retained partition capacity is exhausted"
+            ),
+            @ApiResponse(
+                    responseCode = "503",
+                    description = "Partition runtime is unavailable"
+            )
+    })
     ResponseEntity<PublishMessageResponse> publish(
             @PathVariable UUID queueId,
             @Valid @RequestBody

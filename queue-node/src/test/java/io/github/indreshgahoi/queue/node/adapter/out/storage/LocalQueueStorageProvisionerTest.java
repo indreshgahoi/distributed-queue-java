@@ -66,7 +66,10 @@ class LocalQueueStorageProvisionerTest {
                         storageRoot,
                         Duration.ofSeconds(30),
                         Duration.ofSeconds(30),
-                        SEGMENT_BYTES
+                        SEGMENT_BYTES,
+                        1024,
+                        100,
+                        1024 * 1024
                 )
         );
     }

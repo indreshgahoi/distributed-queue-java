@@ -1464,3 +1464,46 @@ Required behavior:
     wait for the same active-operation count to reach zero
     invoke RuntimeQueue.close exactly once
     converge on CLOSED without exposing the stale handle again
+
+## F84 — Concurrent Publishes Compete for the Last Capacity Slot
+
+Two producers observe a partition with room for one retained message.
+
+Required behavior:
+
+    serialize the capacity decision with publication
+    allow at most one PUBLISH WAL append
+    reject the other publish without durable or volatile mutation
+
+## F85 — Multibyte Payload Bypasses a Character Limit
+
+A payload contains characters whose UTF-8 representation uses multiple bytes.
+
+Required behavior:
+
+    measure encoded UTF-8 bytes rather than Java characters
+    reject a payload above the byte limit before WAL append
+    return 413 rather than reporting a storage failure
+
+## F86 — Restart Restores a Full Queue
+
+Snapshot plus WAL recovery reconstructs retained messages at the configured
+count or byte limit.
+
+Required behavior:
+
+    derive counters from authoritative recovered non-DONE states
+    reject subsequent publish before WAL append
+    allow receive and ACK so the queue can release capacity
+
+## F87 — Limits Are Reduced Below Recovered Usage
+
+An operator restarts a partition with limits below its existing retained
+state.
+
+Required behavior:
+
+    do not discard messages or fail startup merely because configuration fell
+    below recovered logical usage
+    reject new publishes until durable ACKs restore capacity
+    keep delivery and acknowledgement available for draining

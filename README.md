@@ -16,12 +16,10 @@ behave under failure.
 
 Latest release: v0.22.1 — reproducible performance baseline.
 
-Current development: v0.23.0 — per-partition runtime admission and draining.
-Queue operations no longer hold a node-wide lifecycle monitor during storage
-I/O. Each active partition owns its admission count and close protocol, so an
-unrelated queue can continue while another partition drains.
-The focused benchmark and raw results are retained in
-[`docs/benchmarks/v0.23.0`](docs/benchmarks/v0.23.0/README.md).
+Current development: v0.24.0 — bounded retained-message admission. Each local
+partition rejects oversized payloads and publications that would exceed its
+retained message or payload-byte budget before writing to the WAL. Capacity is
+released only by a durable ACK and is reconstructed during recovery.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
@@ -78,6 +76,9 @@ The v0.22 request/closure ordering decision is captured in
 The v0.23 lock-scope decision is captured in
 [ADR 0022](docs/adr/0022-per-partition-runtime-admission.md) and the
 [per-partition runtime lifecycle](docs/diagrams/per-partition-runtime-lifecycle.md).
+The v0.24 admission boundary is captured in
+[ADR 0023](docs/adr/0023-bounded-retained-message-admission.md) and the
+[bounded admission lifecycle](docs/diagrams/bounded-admission-lifecycle.md).
 
 ## Roadmap
 
@@ -122,26 +123,30 @@ distributed system.
     only through READY runtime authority, use constant-time lookup, and have a
     checked-in JMH baseline separating queue and forced-WAL costs.
 
+14. **Partition-scoped lifecycle concurrency** — per-partition admission
+    permits order operations against draining and closure without holding a
+    node-wide lock during storage I/O.
+
 ### Current milestone
 
-**v0.23.0 — Per-partition runtime admission and draining**
+**v0.24.0 — Bounded retained-message admission**
 
-Replace node-wide data-plane serialization with explicit per-partition
-`READY` → `CLOSING` → `CLOSED` handles. New work is rejected after closing
-begins, admitted work drains before queue close, and unrelated queues continue
-without waiting for another partition's WAL or lifecycle transition.
+Reject oversized messages and publications that would exceed a partition's
+retained count or UTF-8 payload-byte budget. Admission is atomic with publish,
+rejection is mutation-free, durable ACK releases capacity, and recovery
+reconstructs counters without changing the WAL or snapshot formats.
 
 ### Next decision area
 
-After v0.23.0, the repository will be reviewed again before selecting a
+After v0.24.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
-- **Admission control and backpressure** — prevent unbounded heap, queue-depth,
-  and disk consumption under sustained producer load.
 - **Producer idempotency** — add a durable deduplication contract for ambiguous
   publish responses now that a real network retry boundary exists.
 - **Stable routing endpoint** — resolve queue identity to its currently READY
   node without making customers discover placement metadata themselves.
+- **Admission observability and tenant quotas** — expose saturation and evolve
+  node defaults into metadata-managed resource policy.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
@@ -333,6 +338,9 @@ PROVISIONING_POLL_DELAY=PT1S
 RUNTIME_PARTITION_POLL_DELAY=PT1S
 QUEUE_NODE_PORT=8081
 QUEUE_WAL_SEGMENT_BYTES=16777216
+QUEUE_MAX_MESSAGE_BYTES=262144
+QUEUE_MAX_RETAINED_MESSAGES=100000
+QUEUE_MAX_RETAINED_BYTES=1073741824
 ```
 
 Flyway applies versioned schema migrations before the service becomes ready.
@@ -376,8 +384,10 @@ POST /v1/queues/{queueId}/messages/{receiptHandle}/nack
 Publish accepts `{"payload":"process-order-123"}`. NACK accepts an ISO-8601
 duration such as `{"retryDelay":"PT30S"}`. An empty receive returns `204 No
 Content`; a node without a currently READY runtime returns `503 Service
-Unavailable`. v0.22 deliberately does not provide a stable router, so callers
-must use the assigned node endpoint.
+Unavailable`. Oversized payloads return `413 Payload Too Large`; exhausted
+retained count or byte capacity returns `429 Too Many Requests`. Both publish
+rejections occur before WAL append. v0.24 deliberately does not provide a
+stable router, so callers must use the assigned node endpoint.
 
 See the [provisioning sequence](docs/diagrams/provisioning-claim-sequence.md)
 and [decision flow](docs/diagrams/provisioning-claim-flow.md) for the complete

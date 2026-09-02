@@ -20,10 +20,18 @@ import java.util.Optional;
 final class LocalRuntimeQueueFactory implements RuntimeQueueFactory {
     private final Path storageRoot;
     private final long walSegmentBytes;
+    private final QueueConfiguration queueConfiguration;
 
     LocalRuntimeQueueFactory(QueueNodeProperties properties) {
         storageRoot = properties.storageRoot();
         walSegmentBytes = properties.walSegmentBytes();
+        queueConfiguration = new QueueConfiguration(
+                Duration.ofSeconds(30),
+                3,
+                properties.maxMessageBytes(),
+                properties.maxRetainedMessages(),
+                properties.maxRetainedBytes()
+        );
     }
 
     @Override
@@ -43,7 +51,7 @@ final class LocalRuntimeQueueFactory implements RuntimeQueueFactory {
             );
             LocalMessageQueue queue = new LocalMessageQueue(
                     Clock.systemUTC(),
-                    new QueueConfiguration(),
+                    queueConfiguration,
                     wal,
                     snapshots
             );
