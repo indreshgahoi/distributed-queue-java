@@ -694,3 +694,44 @@ through PostgreSQL only after revalidating every authority dimension.
 - producer idempotency;
 - reassignment, storage transfer, and replication;
 - push notification and large-topology pagination.
+
+## v0.22.0 — Authority-Guarded Node-Local Data Plane
+
+### Decision
+
+Expose publish, receive, ACK, and NACK from the queue node and admit them only
+through `RuntimePartitionManager`. Hold the manager's lifecycle monitor for the
+complete local queue operation so runtime closure and operation execution have
+one explicit order. Revalidate the matching registration lease at admission.
+
+### Gain
+
+- completes the first end-to-end path from shared metadata to durable message
+  mutation;
+- prevents request handlers from retaining or bypassing managed runtimes;
+- uses an O(1) queue-ID serving index instead of scanning all active runtimes;
+- closes the race between local runtime close and a concurrent operation;
+- preserves all existing WAL and receipt-handle semantics behind HTTP;
+- applies clock-driven expiry and delayed-retry transitions at request
+  boundaries rather than permitting stale receipt acceptance;
+- creates the real ambiguous-response boundary needed to design producer
+  idempotency from an observed failure rather than a hypothetical API.
+
+### Cost
+
+- one monitor serializes lifecycle changes with all operations across runtimes
+  on a node;
+- a slow WAL force delays deactivation and operations for other local queues;
+- clients must discover and directly address the assigned node;
+- placement changes are learned by polling, not checked in PostgreSQL for every
+  request;
+- an HTTP timeout after commit remains ambiguous and can produce duplicates.
+
+### Deferred
+
+- per-partition lifecycle guards or reference-counted runtime handles;
+- stable routing, proxying, and client endpoint discovery;
+- producer idempotency and durable deduplication;
+- admission control, quotas, and payload limits;
+- reassignment, replication, leader election, and multi-partition routing;
+- authentication, authorization, and transport security.

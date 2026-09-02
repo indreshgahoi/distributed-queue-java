@@ -11,6 +11,7 @@ import io.github.indreshgahoi.queue.node.domain.model.RuntimePartitionState;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -275,7 +276,36 @@ class RuntimePartitionManagerTest {
                 throw new IllegalStateException("recovery failed");
             }
             afterOpen.run();
-            return closes::incrementAndGet;
+            return new RuntimeQueue() {
+                @Override
+                public String publish(String payload) {
+                    return "message-id";
+                }
+
+                @Override
+                public Optional<io.github.indreshgahoi.queue.node.domain.model.MessageDelivery>
+                receive() {
+                    return Optional.empty();
+                }
+
+                @Override
+                public boolean ack(String receiptHandle) {
+                    return true;
+                }
+
+                @Override
+                public boolean nack(
+                        String receiptHandle,
+                        Duration retryDelay
+                ) {
+                    return true;
+                }
+
+                @Override
+                public void close() {
+                    closes.incrementAndGet();
+                }
+            };
         }
     }
 }

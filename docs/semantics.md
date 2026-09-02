@@ -2384,3 +2384,61 @@ The runtime-status row records the last successfully fenced `READY` or `FAILED`
 publication. It does not extend a registration lease, change placement, or
 authorize reassignment. Consumers must interpret it together with current
 registration and placement metadata.
+
+## v0.22.0 — Authority-Guarded Node-Local Data Plane
+
+### G201 — Message operations require a locally READY runtime
+
+Publish, receive, ACK, and NACK execute only when the addressed queue ID maps
+to an active runtime installed by fenced recovery on that queue node. A
+placement row, filesystem directory, or last-published READY status is not
+sufficient. Otherwise the node reports temporary unavailability and performs
+no queue mutation.
+
+### G202 — Request admission revalidates process authority
+
+Before entering a runtime, the node verifies that its current registration is
+unexpired and has the same registration epoch captured by runtime identity.
+Failure closes that runtime locally and rejects the request.
+
+### G203 — Operations and runtime closure are mutually ordered
+
+Data-plane admission and runtime reconciliation use one lifecycle guard. If an
+operation enters first, deactivation waits until the operation returns. If
+deactivation enters first, later operations cannot obtain the old runtime.
+Callers never retain a runtime reference beyond the guarded operation.
+
+### G204 — Existing local durability semantics remain authoritative
+
+The node adapter delegates operations to `LocalMessageQueue`. A successful
+publish, receive, ACK, or NACK therefore retains the existing WAL-first,
+receipt-handle, lease, retry, and dead-letter guarantees. HTTP does not create
+a weaker mutation path.
+
+### G205 — Empty receive is not an availability failure
+
+Receiving from a READY but empty queue returns `204 No Content`. Receiving when
+the queue is not READY on the addressed node returns `503 Service Unavailable`.
+These outcomes are observably distinct.
+
+### G206 — ACK and NACK preserve receipt-handle semantics
+
+ACK or NACK returns `succeeded = true` only for the current active receipt
+handle. An unknown, expired, or superseded receipt returns `succeeded = false`
+and does not mutate another delivery attempt. Before receive, ACK, or NACK, the
+node applies due lease-expiry and delayed-retry transitions so correctness does
+not depend on an unrelated background sweep.
+
+### G207 — v0.22 does not make publish retries idempotent
+
+If publish commits to the WAL and the HTTP response is lost, retrying can
+create another message. Clients must treat that outcome as ambiguous. Producer
+request identity and durable deduplication are deferred.
+
+### Explicit non-guarantees
+
+v0.22 provides no stable routing endpoint, proxying, multi-partition routing,
+reassignment, replication, cross-node receipt portability, producer
+idempotency, admission control, authentication, or authorization. Placement
+changes remain observable through periodic reconciliation rather than a
+per-request PostgreSQL read; automatic reassignment is still unsupported.

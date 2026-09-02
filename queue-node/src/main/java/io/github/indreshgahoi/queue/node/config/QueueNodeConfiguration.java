@@ -7,6 +7,7 @@ import io.github.indreshgahoi.queue.node.application.port.out.RuntimeQueueFactor
 import io.github.indreshgahoi.queue.node.application.port.out.RuntimeTopologyClient;
 import io.github.indreshgahoi.queue.node.application.service.NodeRegistrationManager;
 import io.github.indreshgahoi.queue.node.application.service.ProvisioningReconciler;
+import io.github.indreshgahoi.queue.node.application.service.QueueDataPlaneService;
 import io.github.indreshgahoi.queue.node.application.service.RuntimePartitionManager;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -71,5 +72,12 @@ class QueueNodeConfiguration {
                 topology,
                 queues
         );
+    }
+
+    @Bean
+    QueueDataPlaneService queueDataPlaneService(
+            RuntimePartitionManager partitions
+    ) {
+        return new QueueDataPlaneService(partitions);
     }
 }

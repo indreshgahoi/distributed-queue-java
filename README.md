@@ -14,12 +14,11 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.20.0 — durable node registration and partition placement.
+Latest release: v0.21.0 — fenced runtime partition activation.
 
-Current development: v0.21.0 — fenced runtime partition activation. Queue nodes
-recover `ACTIVE` lineage-bound storage into managed `LocalMessageQueue`
-instances and publish `READY` only while registration and placement authority
-remain current.
+Current development: v0.22.0 — authority-guarded node-local data plane. Queue
+nodes expose publish, receive, ACK, and NACK only through a guarded `READY`
+runtime boundary that serializes each operation against runtime deactivation.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
@@ -69,6 +68,9 @@ testing, logging, durability, API evolution, and review are defined in the
 The v0.21 authority decision and end-to-end lifecycle are captured in
 [ADR 0020](docs/adr/0020-fenced-runtime-partition-activation.md) and the
 [runtime partition lifecycle](docs/diagrams/runtime-partition-lifecycle.md).
+The v0.22 request/closure ordering decision is captured in
+[ADR 0021](docs/adr/0021-authority-guarded-node-local-data-plane.md) and the
+[data-plane operation lifecycle](docs/diagrams/data-plane-operation-lifecycle.md).
 
 ## Roadmap
 
@@ -106,27 +108,31 @@ distributed system.
     fencing.
 11. **Lease-fenced provisioning** — queue nodes materialize lineage-bound
     storage through durable claims and fenced lifecycle publication.
+12. **Fenced runtime activation** — queue nodes recover only authoritative
+    `ACTIVE` placements, publish readiness through PostgreSQL fencing, and
+    close runtimes when process authority is lost.
 
 ### Current milestone
 
-**v0.21.0 — Fenced runtime partition activation**
+**v0.22.0 — Authority-guarded node-local data plane**
 
-Reconcile node-specific `ACTIVE` placements into recovered local queue
-runtimes. Runtime readiness is published through PostgreSQL only after it
-revalidates queue generation, node registration epoch and lease, and placement
-epoch. Losing registration or placement authority closes the local runtime.
+Expose publish, receive, ACK, and NACK on the queue node. Every operation enters
+through `RuntimePartitionManager`, which verifies a locally `READY` runtime and
+an unexpired matching registration, then holds the runtime lifecycle guard
+until the durable operation completes. Deactivation either waits for admitted
+work or wins first and rejects new work.
 
 ### Next decision area
 
-After v0.21.0, the repository will be reviewed again before selecting a
+After v0.22.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,
   and disk consumption under sustained producer load.
-- **Producer idempotency** — resolve duplicate publication when a producer
-  retries after an ambiguous response.
-- **Routed data-plane API** — resolve queue identity to a `READY` runtime and
-  expose send, receive, ACK, and NACK without bypassing runtime authority.
+- **Producer idempotency** — add a durable deduplication contract for ambiguous
+  publish responses now that a real network retry boundary exists.
+- **Stable routing endpoint** — resolve queue identity to its currently READY
+  node without making customers discover placement metadata themselves.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
@@ -346,6 +352,23 @@ GET  /internal/v1/runtime/partitions                metadata observation
 GET  http://localhost:8081/internal/v1/runtime/partitions
                                                      node-local observation
 ```
+
+Customer message operations currently target the node that owns the queue's
+single partition. Queue-node Swagger UI is available at
+`http://localhost:8081/swagger-ui.html`.
+
+```text
+POST /v1/queues/{queueId}/messages
+POST /v1/queues/{queueId}/messages/receive
+POST /v1/queues/{queueId}/messages/{receiptHandle}/ack
+POST /v1/queues/{queueId}/messages/{receiptHandle}/nack
+```
+
+Publish accepts `{"payload":"process-order-123"}`. NACK accepts an ISO-8601
+duration such as `{"retryDelay":"PT30S"}`. An empty receive returns `204 No
+Content`; a node without a currently READY runtime returns `503 Service
+Unavailable`. v0.22 deliberately does not provide a stable router, so callers
+must use the assigned node endpoint.
 
 See the [provisioning sequence](docs/diagrams/provisioning-claim-sequence.md)
 and [decision flow](docs/diagrams/provisioning-claim-flow.md) for the complete

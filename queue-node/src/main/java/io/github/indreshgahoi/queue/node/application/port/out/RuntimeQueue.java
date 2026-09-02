@@ -1,11 +1,24 @@
 package io.github.indreshgahoi.queue.node.application.port.out;
 
+import io.github.indreshgahoi.queue.node.domain.model.MessageDelivery;
+
+import java.time.Duration;
+import java.util.Optional;
+
 /**
- * Lifecycle boundary for a recovered queue runtime. Keeping this port narrow
- * prevents reconciliation from depending on message operations before the
- * data-plane API and its retry semantics are deliberately introduced.
+ * Node-facing boundary for one recovered queue partition. The adapter owns the
+ * concrete local engine so the application layer does not depend on its
+ * storage implementation.
  */
 public interface RuntimeQueue extends AutoCloseable {
+    String publish(String payload);
+
+    Optional<MessageDelivery> receive();
+
+    boolean ack(String receiptHandle);
+
+    boolean nack(String receiptHandle, Duration retryDelay);
+
     @Override
     void close();
 }

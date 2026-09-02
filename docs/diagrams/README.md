@@ -12,3 +12,5 @@ ordering, authority, or failure handling.
   placement-aware provisioning.
 - [Runtime partition lifecycle](runtime-partition-lifecycle.md) — durable queue
   progression, fenced recovery, readiness publication, and deactivation.
+- [Data-plane operation lifecycle](data-plane-operation-lifecycle.md) — guarded
+  request admission, WAL delegation, and deterministic closure race ordering.

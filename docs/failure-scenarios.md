@@ -1351,3 +1351,72 @@ Required behavior:
     omit the partition from node-specific runtime placement discovery
     do not race runtime recovery with storage materialization
     activate only after fenced provisioning publishes ACTIVE
+
+## F74 — Request Arrives Before Runtime Is READY
+
+A client addresses a node while the partition is recovering, failed, closed,
+or assigned elsewhere.
+
+Required behavior:
+
+    return 503 Service Unavailable
+    do not open storage from the request path
+    do not execute against placement or stale READY observation alone
+
+## F75 — Deactivation Races with an In-Progress Operation
+
+A data-plane operation has entered a runtime when reconciliation observes lost
+registration authority and attempts to close it.
+
+Required behavior:
+
+    establish one order between operation and closure
+    if operation entered first, let its durable transition finish before close
+    if closure entered first, reject the operation without mutation
+    never use a queue object after close
+
+## F76 — Registration Expires Between Reconciliation Ticks
+
+The node still has a runtime in its active map, but its locally observed
+registration lease has expired before the next scheduler tick.
+
+Required behavior:
+
+    revalidate registration at request admission
+    close the runtime and return 503
+    do not wait for periodic reconciliation to reject new traffic
+
+## F77 — Publish Commits but HTTP Response Is Lost
+
+The WAL durably accepts a message, then the connection fails before the client
+observes `201 Created`. The client retries the same payload.
+
+Current v0.22 behavior:
+
+    the retry can publish a second message
+    document the result as ambiguous
+    preserve both successfully committed messages
+
+Future requirement:
+
+    introduce a producer request identity and durable deduplication contract
+
+## F78 — Empty Queue Is Mistaken for an Unavailable Runtime
+
+A receive finds no READY messages in an otherwise authoritative runtime.
+
+Required behavior:
+
+    return 204 No Content for an empty READY queue
+    reserve 503 for absence of a serviceable runtime
+
+## F79 — Stale Receipt Is Submitted Through HTTP
+
+A client retries ACK or NACK after the receipt expired or a newer delivery
+attempt was created.
+
+Required behavior:
+
+    return succeeded=false
+    preserve the current delivery
+    do not translate a stale receipt into a server failure

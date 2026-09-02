@@ -5,6 +5,7 @@ import io.github.indreshgahoi.queue.node.application.port.out.NodeRegistrationPr
 import io.github.indreshgahoi.queue.node.application.port.out.RuntimeQueue;
 import io.github.indreshgahoi.queue.node.application.port.out.RuntimeQueueFactory;
 import io.github.indreshgahoi.queue.node.application.port.out.RuntimeTopologyClient;
+import io.github.indreshgahoi.queue.node.domain.exception.RuntimePartitionUnavailableException;
 import io.github.indreshgahoi.queue.node.domain.model.NodeRegistration;
 import io.github.indreshgahoi.queue.node.domain.model.PartitionPlacement;
 import io.github.indreshgahoi.queue.node.domain.model.RuntimePartitionIdentity;
@@ -21,6 +22,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
 
 /**
  * Reconciles PostgreSQL's desired placement state with open local queue
@@ -37,6 +40,8 @@ public final class RuntimePartitionManager
     private final RuntimeTopologyClient topology;
     private final RuntimeQueueFactory queues;
     private final Map<PartitionKey, ActivePartition> active = new HashMap<>();
+    private final Map<UUID, PartitionKey> servingKeyByQueueId =
+            new HashMap<>();
     private final Map<PartitionKey, RuntimePartitionView> failures =
             new HashMap<>();
 
@@ -101,6 +106,38 @@ public final class RuntimePartitionManager
                 .toList();
     }
 
+    /**
+     * Executes against a READY runtime while holding the same monitor used by
+     * reconciliation and shutdown. Consequently either the operation enters
+     * first and closure waits, or deactivation enters first and the operation
+     * is rejected. There is no interval in which a caller can retain a queue
+     * reference after its placement authority has been withdrawn locally.
+     */
+    public synchronized <T> T withReadyQueue(
+            UUID queueId,
+            Function<RuntimeQueue, T> operation
+    ) {
+        Objects.requireNonNull(queueId, "queueId");
+        Objects.requireNonNull(operation, "operation");
+        PartitionKey key = servingKeyByQueueId.get(queueId);
+        ActivePartition partition = key == null ? null : active.get(key);
+        if (partition == null) {
+            throw new RuntimePartitionUnavailableException(queueId);
+        }
+        boolean registrationStillAuthoritative = currentLiveRegistration()
+                .filter(registration -> registration.registrationEpoch()
+                        == partition.identity().registrationEpoch())
+                .isPresent();
+        if (!registrationStillAuthoritative) {
+            deactivate(
+                    PartitionKey.from(partition.identity()),
+                    "registration authority unavailable at request admission"
+            );
+            throw new RuntimePartitionUnavailableException(queueId);
+        }
+        return operation.apply(partition.queue());
+    }
+
     private Map<PartitionKey, DesiredPartition> desiredPartitions(
             List<PartitionPlacement> placements,
             NodeRegistration registration
@@ -161,7 +198,40 @@ public final class RuntimePartitionManager
                 closeQuietly(queue);
                 return;
             }
-            active.put(key, new ActivePartition(desired.identity(), queue));
+            ActivePartition activated = new ActivePartition(
+                    desired.identity(),
+                    queue
+            );
+            ActivePartition previousActive = active.put(key, activated);
+            // v0.22 supports exactly one partition and one active generation
+            // per queue. This secondary serving index keeps the request path
+            // O(1), while the lineage-keyed map remains authoritative for
+            // reconciliation and supersession.
+            PartitionKey previousServingKey = servingKeyByQueueId.put(
+                    desired.identity().queueId(),
+                    key
+            );
+            if (previousActive != null || previousServingKey != null) {
+                if (previousActive == null) {
+                    active.remove(key);
+                } else {
+                    active.put(key, previousActive);
+                }
+                if (previousServingKey == null) {
+                    servingKeyByQueueId.remove(
+                            desired.identity().queueId()
+                    );
+                } else {
+                    servingKeyByQueueId.put(
+                            desired.identity().queueId(),
+                            previousServingKey
+                    );
+                }
+                throw new IllegalStateException(
+                        "multiple active runtimes for queue "
+                                + desired.identity().queueId()
+                );
+            }
             failures.remove(key);
             log.info(
                     "event=runtime_partition_activated queueId={} "
@@ -251,6 +321,10 @@ public final class RuntimePartitionManager
         if (removed == null) {
             return;
         }
+        servingKeyByQueueId.remove(
+                removed.identity().queueId(),
+                key
+        );
         closeQuietly(removed.queue());
         log.info(
                 "event=runtime_partition_deactivated queueId={} "
