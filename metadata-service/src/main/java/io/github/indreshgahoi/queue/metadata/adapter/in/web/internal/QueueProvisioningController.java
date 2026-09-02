@@ -40,6 +40,7 @@ class QueueProvisioningController {
         return provisioning.claim(
                         new ClaimProvisioningCommand(
                                 request.workerId(),
+                                request.registrationEpoch(),
                                 Duration.ofSeconds(
                                         request.leaseSeconds()
                                 )
@@ -81,6 +82,8 @@ class QueueProvisioningController {
                 request.generationId(),
                 request.partitionId(),
                 request.workerId(),
+                request.registrationEpoch(),
+                request.placementEpoch(),
                 request.fencingToken()
         );
     }

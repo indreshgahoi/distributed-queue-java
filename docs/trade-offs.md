@@ -629,3 +629,37 @@ may publish `ACTIVE` or `PROVISIONING_FAILED`.
 - partition placement and runtime ownership epochs;
 - automatic retry policy for `PROVISIONING_FAILED` descriptors;
 - deletion reconciliation and storage garbage collection.
+
+## v0.20.0 — Durable Node Registry and Partition Placement
+
+### Decision
+
+Make PostgreSQL authoritative for queue-node process registrations and initial
+partition placement. Fence repeated use of a stable node ID with a registration
+epoch, renew liveness through finite heartbeats, and create one durable
+placement before provisioning. Select the live node with the fewest placements,
+using node ID as a deterministic tie-breaker.
+
+### Gain
+
+- metadata can answer where each partition is intended to live;
+- anonymous workers can no longer provision arbitrary queues;
+- duplicate processes using one node ID are explicitly fenced;
+- provisioning completion proves current node, placement, and claim authority;
+- placement establishes the routing prerequisite for a future data-plane API.
+
+### Cost
+
+- node availability now depends on timely metadata heartbeats;
+- wall-clock lease assumptions extend from claims to membership;
+- count-based placement ignores disk size, queue traffic, and node capacity;
+- a metadata outage eventually removes every node's permission to do new work;
+- placements on expired nodes remain unavailable instead of moving.
+
+### Deferred
+
+- automatic reassignment and storage transfer;
+- node capacity, zones, draining, and placement constraints;
+- runtime ownership leases and message-serving endpoints;
+- replicated storage and recovery-source selection;
+- authenticated node identity and transport security.

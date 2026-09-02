@@ -3,6 +3,7 @@ package io.github.indreshgahoi.queue.metadata.adapter.out.postgres;
 import io.github.indreshgahoi.queue.metadata.application.port.out.QueueMetadataRepository;
 import io.github.indreshgahoi.queue.metadata.domain.exception.IdempotencyConflictException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.MetadataUnavailableException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.NodeLeaseLostException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.ProvisioningClaimLostException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueAlreadyExistsException;
 import io.github.indreshgahoi.queue.metadata.domain.exception.QueueMetadataException;
@@ -96,15 +97,24 @@ class PostgresQueueMetadataRepository
         Objects.requireNonNull(command, "command");
         return inTransaction(connection -> {
             Instant claimedAt = now();
-            Optional<QueueDescriptor> candidate =
+            requireLiveNodeRegistration(
+                    connection,
+                    command,
+                    claimedAt
+            );
+            assignNextUnplacedPartition(connection, claimedAt);
+            Optional<ProvisioningCandidate> candidate =
                     lockProvisioningCandidate(
                             connection,
+                            command.workerId(),
+                            command.registrationEpoch(),
                             claimedAt
                     );
             if (candidate.isEmpty()) {
                 return Optional.empty();
             }
-            QueueDescriptor queue = candidate.orElseThrow();
+            ProvisioningCandidate selected = candidate.orElseThrow();
+            QueueDescriptor queue = selected.queue();
             Instant leaseExpiresAt = claimedAt.plus(
                     command.leaseDuration()
             );
@@ -112,6 +122,8 @@ class PostgresQueueMetadataRepository
                     connection,
                     queue,
                     command.workerId(),
+                    command.registrationEpoch(),
+                    selected.placementEpoch(),
                     leaseExpiresAt,
                     claimedAt
             );
@@ -123,6 +135,8 @@ class PostgresQueueMetadataRepository
                                     queue.generationId(),
                                     0,
                                     command.workerId(),
+                                    command.registrationEpoch(),
+                                    selected.placementEpoch(),
                                     token
                             ),
                             leaseExpiresAt
@@ -329,14 +343,104 @@ class PostgresQueueMetadataRepository
         }
     }
 
-    private Optional<QueueDescriptor> lockProvisioningCandidate(
+    private void requireLiveNodeRegistration(
             Connection connection,
+            ClaimProvisioningCommand command,
             Instant claimedAt
     ) throws SQLException {
         String sql = """
-                SELECT q.*
+                SELECT 1
+                FROM queue_nodes
+                WHERE node_id = ?
+                  AND registration_epoch = ?
+                  AND lease_expires_at > ?
+                """;
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setString(1, command.workerId());
+            statement.setLong(2, command.registrationEpoch());
+            statement.setTimestamp(3, Timestamp.from(claimedAt));
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    throw new NodeLeaseLostException();
+                }
+            }
+        }
+    }
+
+    private void assignNextUnplacedPartition(
+            Connection connection,
+            Instant assignedAt
+    ) throws SQLException {
+        String sql = """
+                WITH candidate AS (
+                    SELECT q.queue_id, q.generation_id
+                    FROM queues q
+                    WHERE q.lifecycle_state = 'PROVISIONING'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM queue_partition_placements p
+                          WHERE p.queue_id = q.queue_id
+                            AND p.generation_id = q.generation_id
+                            AND p.partition_id = 0
+                      )
+                    ORDER BY q.created_at, q.queue_id
+                    FOR UPDATE OF q SKIP LOCKED
+                    LIMIT 1
+                ), selected_node AS (
+                    SELECT n.node_id
+                    FROM queue_nodes n
+                    LEFT JOIN queue_partition_placements p
+                      ON p.node_id = n.node_id
+                    WHERE n.lease_expires_at > ?
+                    GROUP BY n.node_id
+                    ORDER BY COUNT(p.queue_id), n.node_id
+                    LIMIT 1
+                )
+                INSERT INTO queue_partition_placements (
+                    queue_id,
+                    generation_id,
+                    partition_id,
+                    node_id,
+                    placement_epoch,
+                    metadata_version,
+                    created_at,
+                    updated_at
+                )
+                SELECT c.queue_id, c.generation_id, 0, n.node_id,
+                       1, 0, ?, ?
+                FROM candidate c
+                CROSS JOIN selected_node n
+                ON CONFLICT DO NOTHING
+                """;
+        try (PreparedStatement statement =
+                     connection.prepareStatement(sql)) {
+            statement.setTimestamp(1, Timestamp.from(assignedAt));
+            statement.setTimestamp(2, Timestamp.from(assignedAt));
+            statement.setTimestamp(3, Timestamp.from(assignedAt));
+            statement.executeUpdate();
+        }
+    }
+
+    private Optional<ProvisioningCandidate> lockProvisioningCandidate(
+            Connection connection,
+            String workerId,
+            long registrationEpoch,
+            Instant claimedAt
+    ) throws SQLException {
+        String sql = """
+                SELECT q.*, p.placement_epoch
                 FROM queues q
+                JOIN queue_partition_placements p
+                  ON p.queue_id = q.queue_id
+                 AND p.generation_id = q.generation_id
+                 AND p.partition_id = 0
+                JOIN queue_nodes n
+                  ON n.node_id = p.node_id
                 WHERE q.lifecycle_state = 'PROVISIONING'
+                  AND p.node_id = ?
+                  AND n.registration_epoch = ?
+                  AND n.lease_expires_at > ?
                   AND NOT EXISTS (
                       SELECT 1
                       FROM queue_provisioning_claims c
@@ -349,10 +453,16 @@ class PostgresQueueMetadataRepository
                 """;
         try (PreparedStatement statement =
                      connection.prepareStatement(sql)) {
-            statement.setTimestamp(1, Timestamp.from(claimedAt));
+            statement.setString(1, workerId);
+            statement.setLong(2, registrationEpoch);
+            statement.setTimestamp(3, Timestamp.from(claimedAt));
+            statement.setTimestamp(4, Timestamp.from(claimedAt));
             try (ResultSet resultSet = statement.executeQuery()) {
                 return resultSet.next()
-                        ? Optional.of(map(resultSet))
+                        ? Optional.of(new ProvisioningCandidate(
+                                map(resultSet),
+                                resultSet.getLong("placement_epoch")
+                        ))
                         : Optional.empty();
             }
         }
@@ -362,6 +472,8 @@ class PostgresQueueMetadataRepository
             Connection connection,
             QueueDescriptor queue,
             String workerId,
+            long registrationEpoch,
+            long placementEpoch,
             Instant leaseExpiresAt,
             Instant claimedAt
     ) throws SQLException {
@@ -371,14 +483,18 @@ class PostgresQueueMetadataRepository
                     generation_id,
                     partition_id,
                     worker_id,
+                    registration_epoch,
+                    placement_epoch,
                     fencing_token,
                     lease_expires_at,
                     updated_at
-                ) VALUES (?, ?, 0, ?, 1, ?, ?)
+                ) VALUES (?, ?, 0, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT (queue_id) DO UPDATE
                 SET generation_id = EXCLUDED.generation_id,
                     partition_id = EXCLUDED.partition_id,
                     worker_id = EXCLUDED.worker_id,
+                    registration_epoch = EXCLUDED.registration_epoch,
+                    placement_epoch = EXCLUDED.placement_epoch,
                     fencing_token =
                         queue_provisioning_claims.fencing_token + 1,
                     lease_expires_at = EXCLUDED.lease_expires_at,
@@ -390,8 +506,10 @@ class PostgresQueueMetadataRepository
             statement.setObject(1, queue.queueId());
             statement.setObject(2, queue.generationId());
             statement.setString(3, workerId);
-            statement.setTimestamp(4, Timestamp.from(leaseExpiresAt));
-            statement.setTimestamp(5, Timestamp.from(claimedAt));
+            statement.setLong(4, registrationEpoch);
+            statement.setLong(5, placementEpoch);
+            statement.setTimestamp(6, Timestamp.from(leaseExpiresAt));
+            statement.setTimestamp(7, Timestamp.from(claimedAt));
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
                     throw new QueueMetadataException(
@@ -422,7 +540,7 @@ class PostgresQueueMetadataRepository
             }
             if (queue.lifecycleState()
                     != QueueLifecycleState.PROVISIONING
-                    || !current.leaseExpiresAt().isAfter(now())) {
+                    || !current.authoritativeAt(now())) {
                 throw new ProvisioningClaimLostException();
             }
             return updateTransition(
@@ -442,11 +560,22 @@ class PostgresQueueMetadataRepository
                        c.generation_id AS claim_generation_id,
                        c.partition_id AS claim_partition_id,
                        c.worker_id AS claim_worker_id,
+                       c.registration_epoch AS claim_registration_epoch,
+                       c.placement_epoch AS claim_placement_epoch,
                        c.fencing_token AS claim_fencing_token,
-                       c.lease_expires_at AS claim_lease_expires_at
+                       c.lease_expires_at AS claim_lease_expires_at,
+                       p.placement_epoch AS current_placement_epoch,
+                       n.registration_epoch AS current_registration_epoch,
+                       n.lease_expires_at AS node_lease_expires_at
                 FROM queues q
                 JOIN queue_provisioning_claims c
                   ON c.queue_id = q.queue_id
+                JOIN queue_partition_placements p
+                  ON p.queue_id = q.queue_id
+                 AND p.generation_id = q.generation_id
+                 AND p.partition_id = c.partition_id
+                JOIN queue_nodes n
+                  ON n.node_id = p.node_id
                 WHERE q.queue_id = ?
                 FOR UPDATE OF q, c
                 """;
@@ -466,9 +595,22 @@ class PostgresQueueMetadataRepository
                                 ),
                                 resultSet.getInt("claim_partition_id"),
                                 resultSet.getString("claim_worker_id"),
+                                resultSet.getLong(
+                                        "claim_registration_epoch"
+                                ),
+                                resultSet.getLong("claim_placement_epoch"),
                                 resultSet.getLong("claim_fencing_token"),
                                 resultSet.getTimestamp(
                                         "claim_lease_expires_at"
+                                ).toInstant(),
+                                resultSet.getLong(
+                                        "current_registration_epoch"
+                                ),
+                                resultSet.getLong(
+                                        "current_placement_epoch"
+                                ),
+                                resultSet.getTimestamp(
+                                        "node_lease_expires_at"
                                 ).toInstant()
                         )
                 );
@@ -821,15 +963,36 @@ class PostgresQueueMetadataRepository
             UUID generationId,
             int partitionId,
             String workerId,
+            long registrationEpoch,
+            long placementEpoch,
             long fencingToken,
-            Instant leaseExpiresAt
+            Instant leaseExpiresAt,
+            long currentRegistrationEpoch,
+            long currentPlacementEpoch,
+            Instant nodeLeaseExpiresAt
     ) {
         boolean matches(ProvisioningClaimIdentity identity) {
             return queue.queueId().equals(identity.queueId())
                     && generationId.equals(identity.generationId())
                     && partitionId == identity.partitionId()
                     && workerId.equals(identity.workerId())
+                    && registrationEpoch
+                    == identity.registrationEpoch()
+                    && placementEpoch == identity.placementEpoch()
                     && fencingToken == identity.fencingToken();
         }
+
+        boolean authoritativeAt(Instant instant) {
+            return leaseExpiresAt.isAfter(instant)
+                    && nodeLeaseExpiresAt.isAfter(instant)
+                    && registrationEpoch == currentRegistrationEpoch
+                    && placementEpoch == currentPlacementEpoch;
+        }
+    }
+
+    private record ProvisioningCandidate(
+            QueueDescriptor queue,
+            long placementEpoch
+    ) {
     }
 }

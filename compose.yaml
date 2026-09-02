@@ -40,8 +40,11 @@ services:
         condition: service_started
     environment:
       QUEUE_NODE_ID: local-node-1
+      QUEUE_NODE_ENDPOINT: http://queue-node:8081
       METADATA_SERVICE_URL: http://metadata-service:8080
       QUEUE_STORAGE_ROOT: /var/lib/distributed-queue
+      NODE_REGISTRATION_LEASE_DURATION: PT30S
+      NODE_HEARTBEAT_DELAY: PT10S
       PROVISIONING_LEASE_DURATION: PT30S
       PROVISIONING_POLL_DELAY: PT1S
     restart: unless-stopped

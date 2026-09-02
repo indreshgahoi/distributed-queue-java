@@ -2283,3 +2283,57 @@ work.
 A provisioning claim authorizes only storage materialization and its metadata
 completion. It does not authorize publish, receive, partition leadership,
 traffic routing, replication, or ownership transfer.
+
+## v0.20.0 — Durable Node Registration and Partition Placement
+
+### G186 — Every live node process has a fenced registration
+
+PostgreSQL records node ID, advertised endpoint, registration epoch, and lease
+expiry. Registering an unused node ID creates epoch one. Registering the same
+node ID again increments the epoch and immediately fences the previous process
+incarnation.
+
+### G187 — Heartbeats renew only current unexpired registrations
+
+A heartbeat must match node ID and registration epoch, and the existing lease
+must still be unexpired. An expired or superseded process cannot revive its old
+registration; it must register again and receive a higher epoch.
+
+### G188 — Placement is durable metadata authority
+
+Before provisioning can be claimed, PostgreSQL records exactly one placement
+for `(queueId, generationId, partitionId)`. The placement contains node ID,
+placement epoch, and metadata version. Filesystem presence does not create or
+change placement authority.
+
+### G189 — Initial placement uses live-node load count
+
+For an unplaced `PROVISIONING` queue, metadata selects a node whose registration
+lease is unexpired. It chooses the lowest current placement count and uses node
+ID as a deterministic tie-breaker. Placement and candidate locking occur in the
+same database transaction.
+
+### G190 — Only the assigned node incarnation may claim work
+
+A provisioning claim requires the caller's current node registration and a
+placement assigned to that node. Claim identity includes registration epoch,
+placement epoch, and provisioning fencing token.
+
+### G191 — Completion revalidates every authority dimension
+
+Completion or failure verifies queue generation, partition, assigned node,
+current registration epoch and lease, current placement epoch, claim token, and
+claim lease. Losing any authority dimension prevents lifecycle publication.
+
+### G192 — Placement does not move automatically
+
+Node lease expiry makes its placement unavailable but does not reassign it.
+Automatic movement is unsafe until the system defines storage transfer or a
+replicated recovery source. v0.20 therefore prefers unavailability over
+silently creating an unrelated authoritative copy.
+
+### G193 — Placement is not runtime message ownership
+
+Placement identifies where partition storage is intended to live and fences
+provisioning. It does not yet authorize send/receive traffic, establish a
+partition leader, or prove that the node is ready to serve messages.

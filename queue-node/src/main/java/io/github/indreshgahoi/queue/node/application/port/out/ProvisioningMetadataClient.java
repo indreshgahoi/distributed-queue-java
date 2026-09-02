@@ -8,6 +8,7 @@ import java.util.Optional;
 public interface ProvisioningMetadataClient {
     Optional<ProvisioningAssignment> claim(
             String workerId,
+            long registrationEpoch,
             Duration leaseDuration
     );
 

@@ -61,8 +61,10 @@ class LocalQueueStorageProvisionerTest {
         return new LocalQueueStorageProvisioner(
                 new QueueNodeProperties(
                         "node-a",
+                        URI.create("http://node-a:8081"),
                         URI.create("http://localhost:8080"),
                         storageRoot,
+                        Duration.ofSeconds(30),
                         Duration.ofSeconds(30),
                         SEGMENT_BYTES
                 )
@@ -87,6 +89,8 @@ class LocalQueueStorageProvisionerTest {
                 UUID.randomUUID(),
                 0,
                 "node-a",
+                1,
+                1,
                 1,
                 Instant.parse("2026-09-01T12:00:30Z")
         );

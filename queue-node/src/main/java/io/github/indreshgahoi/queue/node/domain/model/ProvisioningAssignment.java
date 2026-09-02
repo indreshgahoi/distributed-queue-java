@@ -13,6 +13,8 @@ public record ProvisioningAssignment(
         UUID generationId,
         int partitionId,
         String workerId,
+        long registrationEpoch,
+        long placementEpoch,
         long fencingToken,
         Instant leaseExpiresAt
 ) {
@@ -23,7 +25,8 @@ public record ProvisioningAssignment(
         Objects.requireNonNull(generationId, "generationId");
         Objects.requireNonNull(workerId, "workerId");
         Objects.requireNonNull(leaseExpiresAt, "leaseExpiresAt");
-        if (partitionId != 0 || fencingToken <= 0) {
+        if (partitionId != 0 || registrationEpoch <= 0
+                || placementEpoch <= 0 || fencingToken <= 0) {
             throw new IllegalArgumentException(
                     "Invalid provisioning assignment"
             );

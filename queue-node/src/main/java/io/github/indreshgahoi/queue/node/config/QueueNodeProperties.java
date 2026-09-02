@@ -14,8 +14,10 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "queue.node")
 public record QueueNodeProperties(
         @NotBlank String id,
+        @NotNull URI endpoint,
         @NotNull URI metadataBaseUrl,
         @NotNull Path storageRoot,
+        @NotNull Duration registrationLeaseDuration,
         @NotNull Duration leaseDuration,
         @Positive long walSegmentBytes
 ) {

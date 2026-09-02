@@ -29,6 +29,7 @@ final class HttpProvisioningMetadataClient
     @Override
     public Optional<ProvisioningAssignment> claim(
             String workerId,
+            long registrationEpoch,
             Duration leaseDuration
     ) {
         ResponseEntity<ClaimResponse> response = restClient.post()
@@ -36,6 +37,7 @@ final class HttpProvisioningMetadataClient
                 .body(
                         new ClaimRequest(
                                 workerId,
+                                registrationEpoch,
                                 leaseDuration.toSeconds()
                         )
                 )
@@ -70,6 +72,8 @@ final class HttpProvisioningMetadataClient
                                 assignment.generationId(),
                                 assignment.partitionId(),
                                 assignment.workerId(),
+                                assignment.registrationEpoch(),
+                                assignment.placementEpoch(),
                                 assignment.fencingToken()
                         )
                 )
@@ -79,6 +83,7 @@ final class HttpProvisioningMetadataClient
 
     private record ClaimRequest(
             String workerId,
+            long registrationEpoch,
             long leaseSeconds
     ) {
     }
@@ -87,6 +92,8 @@ final class HttpProvisioningMetadataClient
             UUID generationId,
             int partitionId,
             String workerId,
+            long registrationEpoch,
+            long placementEpoch,
             long fencingToken
     ) {
     }
@@ -98,6 +105,8 @@ final class HttpProvisioningMetadataClient
             UUID generationId,
             int partitionId,
             String workerId,
+            long registrationEpoch,
+            long placementEpoch,
             long fencingToken,
             Instant leaseExpiresAt
     ) {
@@ -109,6 +118,8 @@ final class HttpProvisioningMetadataClient
                     generationId,
                     partitionId,
                     workerId,
+                    registrationEpoch,
+                    placementEpoch,
                     fencingToken,
                     leaseExpiresAt
             );

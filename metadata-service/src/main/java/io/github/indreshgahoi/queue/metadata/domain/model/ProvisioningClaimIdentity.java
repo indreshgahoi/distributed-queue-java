@@ -8,6 +8,8 @@ public record ProvisioningClaimIdentity(
         UUID generationId,
         int partitionId,
         String workerId,
+        long registrationEpoch,
+        long placementEpoch,
         long fencingToken
 ) {
     public ProvisioningClaimIdentity {
@@ -19,9 +21,10 @@ public record ProvisioningClaimIdentity(
                     "v0.19 supports only partition 0"
             );
         }
-        if (fencingToken <= 0) {
+        if (registrationEpoch <= 0 || placementEpoch <= 0
+                || fencingToken <= 0) {
             throw new IllegalArgumentException(
-                    "fencingToken must be positive"
+                    "Claim epochs and fencingToken must be positive"
             );
         }
     }

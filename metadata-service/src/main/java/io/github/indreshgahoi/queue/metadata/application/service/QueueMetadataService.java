@@ -69,11 +69,14 @@ final class QueueMetadataService
         claimed.ifPresent(claim -> log.info(
                 "event=provisioning_claim_granted queueId={} "
                         + "generationId={} partitionId={} workerId={} "
+                        + "registrationEpoch={} placementEpoch={} "
                         + "fencingToken={} leaseExpiresAt={}",
                 claim.identity().queueId(),
                 claim.identity().generationId(),
                 claim.identity().partitionId(),
                 claim.identity().workerId(),
+                claim.identity().registrationEpoch(),
+                claim.identity().placementEpoch(),
                 claim.identity().fencingToken(),
                 claim.leaseExpiresAt()
         ));
@@ -231,13 +234,16 @@ final class QueueMetadataService
     ) {
         log.info(
                 "event={} queueId={} generationId={} partitionId={} "
-                        + "workerId={} fencingToken={} state={} "
+                        + "workerId={} registrationEpoch={} "
+                        + "placementEpoch={} fencingToken={} state={} "
                         + "metadataVersion={}",
                 event,
                 claim.queueId(),
                 claim.generationId(),
                 claim.partitionId(),
                 claim.workerId(),
+                claim.registrationEpoch(),
+                claim.placementEpoch(),
                 claim.fencingToken(),
                 queue.lifecycleState(),
                 queue.metadataVersion()

@@ -3,7 +3,9 @@ package io.github.indreshgahoi.queue.metadata;
 import io.github.indreshgahoi.queue.metadata.application.port.in.QueueCatalogUseCase;
 import io.github.indreshgahoi.queue.metadata.application.port.in.QueueLifecycleUseCase;
 import io.github.indreshgahoi.queue.metadata.application.port.in.QueueProvisioningUseCase;
+import io.github.indreshgahoi.queue.metadata.application.port.in.NodeTopologyUseCase;
 import io.github.indreshgahoi.queue.metadata.domain.exception.ProvisioningClaimLostException;
+import io.github.indreshgahoi.queue.metadata.domain.exception.NodeLeaseLostException;
 import io.github.indreshgahoi.queue.metadata.domain.model.ClaimProvisioningCommand;
 import io.github.indreshgahoi.queue.metadata.domain.model.ProvisioningClaim;
 import io.github.indreshgahoi.queue.metadata.domain.exception.IdempotencyConflictException;
@@ -12,6 +14,9 @@ import io.github.indreshgahoi.queue.metadata.domain.exception.StaleQueueMetadata
 import io.github.indreshgahoi.queue.metadata.domain.model.CreateQueueCommand;
 import io.github.indreshgahoi.queue.metadata.domain.model.QueueDescriptor;
 import io.github.indreshgahoi.queue.metadata.domain.model.QueueLifecycleState;
+import io.github.indreshgahoi.queue.metadata.domain.model.NodeRegistration;
+import io.github.indreshgahoi.queue.metadata.domain.model.NodeLeaseIdentity;
+import io.github.indreshgahoi.queue.metadata.domain.model.RegisterNodeCommand;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -76,6 +81,9 @@ class PostgresQueueMetadataRepositoryTest {
     private QueueProvisioningUseCase provisioning;
 
     @Autowired
+    private NodeTopologyUseCase topology;
+
+    @Autowired
     private TestClock clock;
 
     @LocalServerPort
@@ -96,7 +104,8 @@ class PostgresQueueMetadataRepositoryTest {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.execute(
-                    "TRUNCATE queue_provisioning_claims, "
+                    "TRUNCATE queue_partition_placements, queue_nodes, "
+                            + "queue_provisioning_claims, "
                             + "metadata_requests, queues CASCADE"
             );
         }
@@ -287,6 +296,7 @@ class PostgresQueueMetadataRepositoryTest {
 
     @Test
     void provisioningClaimIsExclusiveAndCompletionActivatesQueue() {
+        NodeRegistration node = register("node-a");
         QueueDescriptor queue = catalog.createQueue(
                 command("tenant-a", "orders", "request-1")
         );
@@ -294,6 +304,7 @@ class PostgresQueueMetadataRepositoryTest {
         ProvisioningClaim claim = provisioning.claim(
                 new ClaimProvisioningCommand(
                         "node-a",
+                        node.registrationEpoch(),
                         Duration.ofSeconds(30)
                 )
         ).orElseThrow();
@@ -302,7 +313,8 @@ class PostgresQueueMetadataRepositoryTest {
         assertEquals(1, claim.identity().fencingToken());
         assertTrue(provisioning.claim(
                 new ClaimProvisioningCommand(
-                        "node-b",
+                        "node-a",
+                        node.registrationEpoch(),
                         Duration.ofSeconds(30)
                 )
         ).isEmpty());
@@ -316,13 +328,161 @@ class PostgresQueueMetadataRepositoryTest {
     }
 
     @Test
+    void registrationEpochFencesPreviousProcessIncarnation() {
+        NodeRegistration first = register("node-a");
+        NodeRegistration second = register("node-a");
+
+        assertEquals(
+                first.registrationEpoch() + 1,
+                second.registrationEpoch()
+        );
+        assertThrows(
+                NodeLeaseLostException.class,
+                () -> topology.heartbeat(
+                        new NodeLeaseIdentity(
+                                first.nodeId(),
+                                first.registrationEpoch()
+                        ),
+                        Duration.ofMinutes(5)
+                )
+        );
+        assertEquals(
+                second.registrationEpoch(),
+                topology.heartbeat(
+                        new NodeLeaseIdentity(
+                                second.nodeId(),
+                                second.registrationEpoch()
+                        ),
+                        Duration.ofMinutes(5)
+                ).registrationEpoch()
+        );
+    }
+
+    @Test
+    void concurrentRegistrationsReceiveUniqueIncreasingEpochs()
+            throws Exception {
+        List<Callable<Long>> calls = IntStream.range(0, 12)
+                .mapToObj(index -> (Callable<Long>) () ->
+                        register("node-a").registrationEpoch())
+                .toList();
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Set<Long> epochs = executor.invokeAll(calls)
+                    .stream()
+                    .map(future -> {
+                        try {
+                            return future.get();
+                        } catch (Exception e) {
+                            throw new AssertionError(e);
+                        }
+                    })
+                    .collect(Collectors.toSet());
+
+            assertEquals(12, epochs.size());
+            assertEquals(1L, epochs.stream().min(Long::compare).orElseThrow());
+            assertEquals(12L, epochs.stream().max(Long::compare).orElseThrow());
+        }
+    }
+
+    @Test
+    void expiredRegistrationCannotHeartbeatOrClaim() {
+        NodeRegistration node = register("node-a");
+        catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        clock.advance(Duration.ofMinutes(6));
+
+        assertThrows(
+                NodeLeaseLostException.class,
+                () -> topology.heartbeat(
+                        new NodeLeaseIdentity(
+                                node.nodeId(),
+                                node.registrationEpoch()
+                        ),
+                        Duration.ofMinutes(5)
+                )
+        );
+        assertThrows(
+                NodeLeaseLostException.class,
+                () -> provisioning.claim(
+                        new ClaimProvisioningCommand(
+                                node.nodeId(),
+                                node.registrationEpoch(),
+                                Duration.ofSeconds(30)
+                        )
+                )
+        );
+    }
+
+    @Test
+    void onlyAssignedLiveNodeCanClaimProvisioning() {
+        NodeRegistration first = register("node-a");
+        NodeRegistration second = register("node-b");
+        QueueDescriptor queue = catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+
+        assertTrue(provisioning.claim(
+                new ClaimProvisioningCommand(
+                        second.nodeId(),
+                        second.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).isEmpty());
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        first.nodeId(),
+                        first.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+
+        assertEquals(first.nodeId(), claim.identity().workerId());
+        assertEquals(1, claim.identity().placementEpoch());
+        assertEquals(queue.queueId(), topology.placements().getFirst().queueId());
+        assertEquals(first.nodeId(), topology.placements().getFirst().nodeId());
+    }
+
+    @Test
+    void changedPlacementEpochFencesExistingClaim()
+            throws SQLException {
+        NodeRegistration node = register("node-a");
+        catalog.createQueue(
+                command("tenant-a", "orders", "request-1")
+        );
+        ProvisioningClaim claim = provisioning.claim(
+                new ClaimProvisioningCommand(
+                        node.nodeId(),
+                        node.registrationEpoch(),
+                        Duration.ofSeconds(30)
+                )
+        ).orElseThrow();
+
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate(
+                    "UPDATE queue_partition_placements "
+                            + "SET placement_epoch = placement_epoch + 1, "
+                            + "metadata_version = metadata_version + 1"
+            );
+        }
+
+        assertThrows(
+                ProvisioningClaimLostException.class,
+                () -> provisioning.complete(claim.identity())
+        );
+    }
+
+    @Test
     void expiredClaimIsTakenOverAndOldTokenIsFenced() {
+        NodeRegistration node = register("node-a");
         catalog.createQueue(
                 command("tenant-a", "orders", "request-1")
         );
         ProvisioningClaim first = provisioning.claim(
                 new ClaimProvisioningCommand(
                         "node-a",
+                        node.registrationEpoch(),
                         Duration.ofSeconds(30)
                 )
         ).orElseThrow();
@@ -330,7 +490,8 @@ class PostgresQueueMetadataRepositoryTest {
         clock.advance(Duration.ofSeconds(31));
         ProvisioningClaim second = provisioning.claim(
                 new ClaimProvisioningCommand(
-                        "node-b",
+                        "node-a",
+                        node.registrationEpoch(),
                         Duration.ofSeconds(30)
                 )
         ).orElseThrow();
@@ -349,6 +510,7 @@ class PostgresQueueMetadataRepositoryTest {
     @Test
     void concurrentWorkersReceiveOnlyOneActiveClaim()
             throws Exception {
+        NodeRegistration node = register("node-a");
         catalog.createQueue(
                 command("tenant-a", "orders", "request-1")
         );
@@ -358,7 +520,8 @@ class PostgresQueueMetadataRepositoryTest {
                                 (Callable<java.util.Optional<ProvisioningClaim>>)
                                         () -> provisioning.claim(
                                                 new ClaimProvisioningCommand(
-                                                        "node-" + index,
+                                                        "node-a",
+                                                        node.registrationEpoch(),
                                                         Duration.ofSeconds(30)
                                                 )
                                         )
@@ -379,6 +542,14 @@ class PostgresQueueMetadataRepositoryTest {
 
             assertEquals(1, claims);
         }
+    }
+
+    private NodeRegistration register(String nodeId) {
+        return topology.register(new RegisterNodeCommand(
+                nodeId,
+                URI.create("http://" + nodeId + ":8081"),
+                Duration.ofMinutes(5)
+        ));
     }
 
     @Test

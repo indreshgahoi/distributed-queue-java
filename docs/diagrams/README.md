@@ -7,3 +7,6 @@ ordering, authority, or failure handling.
   between the queue node, metadata service, PostgreSQL, and local WAL storage.
 - [Provisioning claim decision flow](provisioning-claim-flow.md) — decisions in
   one reconciliation cycle, including failures, lease expiry, and takeover.
+- [Node registration and placement flow](node-registration-placement-flow.md) —
+  process-incarnation fencing, heartbeat renewal, initial placement, and
+  placement-aware provisioning.

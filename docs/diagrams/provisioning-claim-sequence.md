@@ -15,7 +15,7 @@ sequenceDiagram
     participant FS as Lineage-bound WAL Storage
 
     S->>R: runOnce()
-    R->>H: POST /internal/v1/provisioning/claims<br/>{workerId, leaseSeconds}
+    R->>H: POST /internal/v1/provisioning/claims<br/>{workerId, registrationEpoch, leaseSeconds}
     H->>M: claim(command)
     M->>DB: BEGIN
     M->>DB: Select oldest PROVISIONING queue<br/>without an unexpired claim<br/>FOR UPDATE SKIP LOCKED
@@ -42,7 +42,7 @@ sequenceDiagram
         R->>H: POST claims/{queueId}/complete<br/>{generationId, partitionId,<br/>workerId, fencingToken}
         H->>M: complete(claim identity)
         M->>DB: BEGIN + lock queue and claim
-        M->>DB: Verify full identity, PROVISIONING state,<br/>and leaseExpiresAt > database time
+        M->>DB: Verify full identity, registration and placement<br/>epochs, both leases, and PROVISIONING state
 
         alt Claim is still authoritative
             M->>DB: Transition PROVISIONING -> ACTIVE<br/>and increment metadataVersion

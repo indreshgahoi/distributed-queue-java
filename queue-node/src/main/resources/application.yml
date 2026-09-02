@@ -7,8 +7,11 @@ spring:
 queue:
   node:
     id: ${QUEUE_NODE_ID:local-node-1}
+    endpoint: ${QUEUE_NODE_ENDPOINT:http://localhost:8081}
     metadata-base-url: ${METADATA_SERVICE_URL:http://localhost:8080}
     storage-root: ${QUEUE_STORAGE_ROOT:./queue-data}
+    registration-lease-duration: ${NODE_REGISTRATION_LEASE_DURATION:PT30S}
+    heartbeat-delay: ${NODE_HEARTBEAT_DELAY:PT10S}
     lease-duration: ${PROVISIONING_LEASE_DURATION:PT30S}
     poll-delay: ${PROVISIONING_POLL_DELAY:PT1S}
     wal-segment-bytes: ${QUEUE_WAL_SEGMENT_BYTES:16777216}

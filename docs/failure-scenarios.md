@@ -1237,3 +1237,54 @@ Required behavior:
     a retry with the same claim identity returns the ACTIVE descriptor
     do not increment metadata version more than once
     reject completion from any older claim token
+
+## F63 — Two Processes Start with the Same Node ID
+
+The second process registers while the first is still running.
+
+Required behavior:
+
+    increment the durable registration epoch
+    reject heartbeats and provisioning completion from the first process
+    never let the shared node ID make both process incarnations authoritative
+
+## F64 — Node Registration Lease Expires
+
+A node pauses or loses metadata connectivity beyond its registration lease.
+
+Required behavior:
+
+    reject heartbeat under the expired epoch
+    reject new claims and completion from that registration
+    require registration with a higher epoch before new work
+
+## F65 — Unassigned Node Attempts Provisioning
+
+A live node polls while a queue partition is placed on another live node.
+
+Required behavior:
+
+    return no claim to the unassigned node
+    preserve the existing placement
+    allow only the assigned node incarnation to claim
+
+## F66 — Assigned Node Becomes Unavailable
+
+A node lease expires while its partition placement remains durable.
+
+Required behavior:
+
+    do not automatically move the placement
+    do not provision a second filesystem copy as new authority
+    expose unavailability until a future safe reassignment protocol exists
+
+## F67 — Registration Changes During Provisioning
+
+A node claims work, then another process registers with the same node ID before
+the first process completes.
+
+Required behavior:
+
+    retain the storage side effect as non-authoritative
+    reject completion carrying the old registration epoch
+    allow only a claim under current registration and placement authority

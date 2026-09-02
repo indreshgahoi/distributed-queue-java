@@ -1,20 +1,17 @@
 package io.github.indreshgahoi.queue.metadata.domain.model;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.Objects;
 
-public record ClaimProvisioningCommand(
-        String workerId,
-        long registrationEpoch,
+public record RegisterNodeCommand(
+        String nodeId,
+        URI endpoint,
         Duration leaseDuration
 ) {
-    public ClaimProvisioningCommand {
-        QueueDescriptor.requireText(workerId, "workerId");
-        if (registrationEpoch <= 0) {
-            throw new IllegalArgumentException(
-                    "registrationEpoch must be positive"
-            );
-        }
+    public RegisterNodeCommand {
+        QueueDescriptor.requireText(nodeId, "nodeId");
+        Objects.requireNonNull(endpoint, "endpoint");
         Objects.requireNonNull(leaseDuration, "leaseDuration");
         if (leaseDuration.isZero() || leaseDuration.isNegative()) {
             throw new IllegalArgumentException(
@@ -23,3 +20,4 @@ public record ClaimProvisioningCommand(
         }
     }
 }
+

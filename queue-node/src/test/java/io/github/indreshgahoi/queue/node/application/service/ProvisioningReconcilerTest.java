@@ -3,6 +3,7 @@ package io.github.indreshgahoi.queue.node.application.service;
 import io.github.indreshgahoi.queue.node.application.port.out.ProvisioningMetadataClient;
 import io.github.indreshgahoi.queue.node.application.port.out.QueueStorageProvisioner;
 import io.github.indreshgahoi.queue.node.domain.model.ProvisioningAssignment;
+import io.github.indreshgahoi.queue.node.domain.model.NodeRegistration;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -66,6 +67,11 @@ class ProvisioningReconcilerTest {
         return new ProvisioningReconciler(
                 "node-a",
                 Duration.ofSeconds(30),
+                () -> Optional.of(new NodeRegistration(
+                        "node-a",
+                        1,
+                        Instant.parse("2026-09-01T12:01:00Z")
+                )),
                 metadata,
                 storage
         );
@@ -79,6 +85,8 @@ class ProvisioningReconcilerTest {
                 UUID.randomUUID(),
                 0,
                 "node-a",
+                1,
+                1,
                 1,
                 Instant.parse("2026-09-01T12:00:30Z")
         );
@@ -109,6 +117,7 @@ class ProvisioningReconcilerTest {
         @Override
         public Optional<ProvisioningAssignment> claim(
                 String workerId,
+                long registrationEpoch,
                 Duration leaseDuration
         ) {
             return claim;

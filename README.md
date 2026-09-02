@@ -14,12 +14,12 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.18.0 — PostgreSQL-backed queue metadata service.
+Latest release: v0.19.0 — lease-fenced queue provisioning.
 
-Current development: v0.19.0 — lease-fenced queue provisioning. A separate
-queue-node process claims `PROVISIONING` descriptors, creates lineage-bound
-local WAL storage, and publishes `ACTIVE` only while its durable fencing token
-is still authoritative.
+Current development: v0.20.0 — durable queue-node registration and partition
+placement. PostgreSQL now identifies live node process incarnations, assigns
+partition zero to one registered node, and verifies registration, placement,
+and provisioning authority before publishing `ACTIVE`.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
@@ -100,28 +100,31 @@ distributed system.
 10. **Shared metadata authority** — PostgreSQL owns tenant-scoped queue
     identity, lifecycle, retry-safe creation, and optimistic-concurrency
     fencing.
+11. **Lease-fenced provisioning** — queue nodes materialize lineage-bound
+    storage through durable claims and fenced lifecycle publication.
 
 ### Current milestone
 
-**v0.19.0 — Lease-fenced queue provisioning and reconciliation**
+**v0.20.0 — Durable node registration and partition placement**
 
-Introduce a separate queue-node worker. PostgreSQL grants a finite provisioning
-lease with a monotonically increasing fencing token; the winner creates storage
-for the exact queue/generation/partition lineage and conditionally completes
-the lifecycle transition. Expired or superseded workers cannot publish
-`ACTIVE`, while deterministic storage creation makes crash retries safe.
+Register every queue-node process with a finite lease and monotonically
+increasing registration epoch. PostgreSQL creates one durable partition
+placement on a live least-loaded node. Only that node incarnation may claim
+provisioning, and completion revalidates registration, placement, and claim
+authority.
 
 ### Next decision area
 
-After v0.19.0, the repository will be reviewed again before selecting a
+After v0.20.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,
   and disk consumption under sustained producer load.
 - **Producer idempotency** — resolve duplicate publication when a producer
   retries after an ambiguous response.
-- **Queue-node membership and partition placement** — assign storage ownership
-  to registered nodes rather than allowing any node to claim any queue.
+- **Fenced runtime partition ownership and data-plane API** — safely route
+  message operations to the placed node without treating placement as eternal
+  serving authority.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
@@ -303,8 +306,11 @@ The queue node reads:
 
 ```text
 QUEUE_NODE_ID=local-node-1
+QUEUE_NODE_ENDPOINT=http://localhost:8081
 METADATA_SERVICE_URL=http://localhost:8080
 QUEUE_STORAGE_ROOT=./queue-data
+NODE_REGISTRATION_LEASE_DURATION=PT30S
+NODE_HEARTBEAT_DELAY=PT10S
 PROVISIONING_LEASE_DURATION=PT30S
 PROVISIONING_POLL_DELAY=PT1S
 QUEUE_WAL_SEGMENT_BYTES=16777216
@@ -324,6 +330,8 @@ GET    /actuator/health
 The queue node uses the trusted, non-customer provisioning endpoints under
 `/internal/v1/provisioning`. They are intentionally unauthenticated for this
 local learning deployment and must not be exposed outside a trusted network.
+Node registration, heartbeat, and topology inspection use `/internal/v1/nodes`
+and `/internal/v1/placements` under the same trust assumption.
 See the [provisioning sequence](docs/diagrams/provisioning-claim-sequence.md)
 and [decision flow](docs/diagrams/provisioning-claim-flow.md) for the complete
 lease and fencing protocol.
