@@ -2442,3 +2442,11 @@ reassignment, replication, cross-node receipt portability, producer
 idempotency, admission control, authentication, or authorization. Placement
 changes remain observable through periodic reconciliation rather than a
 per-request PostgreSQL read; automatic reassignment is still unsupported.
+
+## v0.22.1 — Performance Baseline
+
+v0.22.1 introduces benchmark infrastructure and checked-in measurements only.
+It does not change queue behavior, durability authority, delivery semantics,
+runtime admission, or any public API. Benchmark scores are observations from a
+recorded machine and workload, not queue guarantees or service-level
+objectives. The authoritative v0.22.0 guarantees remain G201–G207 above.

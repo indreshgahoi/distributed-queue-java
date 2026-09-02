@@ -14,21 +14,23 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.21.0 — fenced runtime partition activation.
+Latest release: v0.22.0 — authority-guarded node-local data plane.
 
-Current development: v0.22.0 — authority-guarded node-local data plane. Queue
-nodes expose publish, receive, ACK, and NACK only through a guarded `READY`
-runtime boundary that serializes each operation against runtime deactivation.
+Current development: v0.22.1 — reproducible performance baseline. JMH
+benchmarks measure local state-machine cost, forced-WAL durability cost, the
+durable receive/ACK cycle, and queue-node runtime admission at different active
+queue counts. Raw results and their execution context remain in the repository.
 
 The implementation remains a single-node/local queue engine. Networking,
 replication, partition ownership, and leader election are not yet included.
 
-The Maven build has three modules and two independently deployable services:
+The Maven build has four modules and two independently deployable services:
 
 ```text
 queue-core        durable local queue engine and storage state machine
 metadata-service Spring Boot control-plane service and PostgreSQL repository
 queue-node        Spring Boot reconciliation worker and local storage adapter
+queue-benchmarks  JMH microbenchmarks and an executable benchmark artifact
 ```
 
 The metadata service keeps its domain authority independent of delivery and
@@ -114,17 +116,17 @@ distributed system.
 
 ### Current milestone
 
-**v0.22.0 — Authority-guarded node-local data plane**
+**v0.22.1 — Reproducible performance baseline**
 
-Expose publish, receive, ACK, and NACK on the queue node. Every operation enters
-through `RuntimePartitionManager`, which verifies a locally `READY` runtime and
-an unexpired matching registration, then holds the runtime lifecycle guard
-until the durable operation completes. Deactivation either waits for admitted
-work or wins first and rejects new work.
+Establish measured latency and throughput baselines before changing the
+v0.22 data-plane locking or durability path. Separate queue-engine overhead
+from synchronous WAL cost, verify that READY lookup remains independent of
+active queue count, expose node-wide admission contention, and keep raw JMH
+evidence in [`docs/benchmarks/v0.22.1`](docs/benchmarks/v0.22.1/README.md).
 
 ### Next decision area
 
-After v0.22.0, the repository will be reviewed again before selecting a
+After v0.22.1, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
 - **Admission control and backpressure** — prevent unbounded heap, queue-depth,

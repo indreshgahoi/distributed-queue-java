@@ -735,3 +735,38 @@ one explicit order. Revalidate the matching registration lease at admission.
 - admission control, quotas, and payload limits;
 - reassignment, replication, leader election, and multi-partition routing;
 - authentication, authorization, and transport security.
+
+## v0.22.1 — Reproducible Performance Baseline
+
+### Decision
+
+Add an isolated JMH module and retain versioned raw results in the repository.
+Measure non-durable engine cost separately from forced-WAL operations and
+measure runtime admission with both 1 and 1,000 active queues. Keep the suite
+short enough for developer execution and label it as diagnostic evidence, not
+capacity certification.
+
+### Gain
+
+- establishes evidence before optimizing the node-wide lifecycle guard;
+- confirms READY lookup cost is independent of the number of active queues;
+- quantifies the large cost boundary between in-memory mutation and forced WAL;
+- makes later performance claims reviewable against raw iteration data;
+- records benchmark state scope so concurrency numbers have an explicit meaning.
+
+### Cost
+
+- adds a build-only JMH dependency and a fourth Maven module;
+- the executable benchmark artifact requires the queue-node thin JAR, so its
+  Spring Boot executable is now attached with the `exec` classifier;
+- short developer runs have wide confidence intervals and cannot size a
+  production deployment;
+- results remain sensitive to JVM, filesystem, device, and competing workloads.
+
+### Deferred
+
+- stable CI performance gates and regression thresholds;
+- HTTP and JSON serialization benchmarks;
+- controlled storage-device and WAL concurrency experiments;
+- profiling-guided lifecycle-lock redesign;
+- soak, recovery-time, and capacity benchmarks.
