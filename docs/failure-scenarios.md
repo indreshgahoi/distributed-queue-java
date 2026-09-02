@@ -1558,3 +1558,55 @@ Required behavior:
 
     return 503 routing-metadata-unavailable
     do not guess a node or use an unvalidated fallback route
+
+## F93 — Follower Receives an Out-of-Order Entry
+
+The follower has sequence 10 and receives sequence 12.
+
+Required behavior:
+
+    reject the entry and report that sequence 11 is required
+    do not append the WAL record
+    retain a higher supplied epoch so the obsolete leader remains fenced
+
+## F94 — Leader Retries an Ambiguous Follower Append
+
+The follower already durably contains the same record at the requested
+sequence, but the prior response was lost.
+
+Required behavior:
+
+    return ALREADY_PRESENT
+    do not append a duplicate WAL record
+    reject the retry if the stored record differs
+
+## F95 — Stale Leader Contacts a Restarted Follower
+
+The follower previously observed epoch 8, restarted, and receives an entry from
+epoch 7.
+
+Required behavior:
+
+    recover epoch 8 from durable state
+    reject epoch 7 before WAL mutation
+
+## F96 — Follower Crashes Between Epoch Fence and WAL Append
+
+The follower durably publishes epoch 9 and crashes before appending the first
+record sent by that leader.
+
+Required behavior:
+
+    retain epoch 9 after restart
+    continue rejecting older epochs
+    allow the missing next sequence to be retried at epoch 9
+
+## F97 — Replication Opens a Reclaimed WAL Suffix
+
+The local WAL no longer contains history from its initial segment, so record
+count cannot prove the next logical replication sequence.
+
+Required behavior:
+
+    fail replica-log initialization closed
+    do not guess a logical sequence from retained physical records

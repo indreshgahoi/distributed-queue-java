@@ -874,3 +874,36 @@ response, and surface transport ambiguity without retry.
 - authentication, authorization, TLS, and endpoint allow-listing;
 - partition-key routing and multi-partition queues;
 - ownership transfer, replicated logs, and leader-aware routing.
+
+## v0.26.0 — Ordered Follower WAL Protocol
+
+### Decision
+
+Add a queue-core follower storage protocol with lineage, a global logical
+sequence, and a durable highest-leader-epoch fence. Reuse the existing WAL for
+record durability and require complete history while sequence metadata is not
+yet integrated with snapshots.
+
+### Gain
+
+- exact retries do not duplicate follower records;
+- gaps, conflicting history, wrong lineage, and stale leaders fail closed;
+- stale-leader fencing survives process restart;
+- advancing the epoch before WAL append gives a safe crash ordering;
+- the protocol is independently testable without prematurely coupling it to
+  metadata, HTTP, placement, or leader election.
+
+### Cost
+
+- opening the follower loads complete WAL history and duplicate validation is
+  backed by an in-memory record list;
+- a separate small epoch authority file adds another durable artifact;
+- advancing an epoch may survive even when its first record does not;
+- reclaimed WAL history cannot yet recover the logical sequence safely.
+
+### Deferred
+
+- replication transport, batching, flow control, and catch-up;
+- snapshot-carried logical indexes and replication-aware reclamation;
+- leader commit index, quorum acknowledgement, and replica membership;
+- election, promotion, log truncation, and divergence repair.

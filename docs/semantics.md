@@ -2589,3 +2589,44 @@ v0.25 does not cache routes, remain available when metadata is unavailable,
 retry operations, provide exactly-once publication, transfer ownership,
 balance replicas, route message keys across partitions, authenticate internal
 services, or replicate queue storage.
+
+## v0.26.0 — Ordered Follower WAL Protocol
+
+### G225 — Replication entries are bound to durable lineage
+
+Every follower append names the queue ID, generation ID, and partition ID. The
+entry is rejected before mutation unless that lineage exactly matches the WAL.
+
+### G226 — Follower sequence is gap-free and monotonic
+
+Sequence numbers begin at one and do not reset across leader epochs. A follower
+appends only `lastSequence + 1`; a higher sequence is rejected as a gap.
+
+### G227 — Exact retries are idempotent
+
+An entry for an already stored sequence succeeds only when its complete
+`WalRecord` equals the stored record. It returns `ALREADY_PRESENT` and performs
+no second WAL append. Different content at that sequence is a conflict.
+
+### G228 — Highest observed leader epoch is a durable fence
+
+Before accepting an entry from a higher epoch, the follower atomically publishes
+and forces the new epoch state. After success or restart, entries from lower
+epochs are rejected. A crash may advance the epoch without appending its first
+record; retrying that record at the current epoch remains valid. Epoch fencing
+precedes sequence validation, so even a gapped or conflicting entry from newer
+authority prevents subsequent mutation by the obsolete leader.
+
+### G229 — Storage ambiguity poisons the follower writer
+
+Failure while publishing a higher epoch or appending its WAL record poisons the
+follower instance. Further appends fail until storage is reopened and recovered.
+Validation rejections do not poison it.
+
+### Explicit non-guarantees
+
+v0.26 does not provide replication transport, leader election, quorum commit,
+acknowledgement policy, lag tracking, catch-up snapshots, promotion, truncation,
+or divergence repair. The initial implementation requires complete WAL history;
+it refuses a reclaimed suffix because physical `WalPosition` is not a logical
+replication index.

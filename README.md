@@ -14,16 +14,15 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.24.0 — bounded retained-message admission.
+Latest release: v0.25.0 — stable data-plane routing gateway.
 
-Current development: v0.25.0 — stable data-plane routing gateway. Customers
-use one gateway address while metadata resolves the currently authoritative
-READY node. The gateway forwards each operation once, preserves node responses,
-and never hides ambiguous mutation outcomes behind an automatic retry.
+Current development: v0.26.0 — ordered follower WAL protocol. A follower now
+accepts lineage-bound WAL entries in logical sequence order, durably fences
+stale leader epochs, and handles exact retries without duplicating records.
 
-Each queue partition remains a single-copy local engine, now reached through a
-network gateway and metadata-backed placement. Ownership transfer,
-multi-partition routing, replication, and leader election are not yet included.
+This is a replication storage primitive, not replicated queue availability.
+Transport, leader election, quorum commit, follower promotion, catch-up, and
+multi-partition routing are not yet included.
 
 The Maven build has five modules and three independently deployable services:
 
@@ -152,37 +151,38 @@ distributed system.
     node-wide lock during storage I/O.
 15. **Bounded retained-message admission** — message and retained-state limits
     reject overload before WAL mutation and survive recovery.
+16. **Stable data-plane routing** — a gateway resolves current READY authority,
+    forwards once, and preserves ambiguous mutation outcomes.
 
 ### Current milestone
 
-**v0.25.0 — Stable data-plane routing gateway**
+**v0.26.0 — Ordered follower WAL protocol**
 
-Resolve queue identity to a fully fenced READY node and forward customer
-operations through a stable gateway address. Preserve downstream semantics,
-bound network waits, and prohibit automatic retry after ambiguous mutation
-failure.
+Establish the first distributed-storage invariant: one lineage-bound follower
+accepts only the next logical WAL sequence from a non-stale leader epoch. Exact
+retries are idempotent, conflicts and gaps fail closed, and the highest observed
+epoch survives restart.
 
 ### Next decision area
 
-After v0.25.0, the repository will be reviewed again before selecting a
+After v0.26.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
-- **Producer idempotency** — add a durable deduplication contract for ambiguous
-  publish responses now that a real network retry boundary exists.
-- **Bounded route caching** — remove PostgreSQL from every request while making
-  staleness and invalidation behavior explicit.
-- **Admission observability and tenant quotas** — expose saturation and evolve
-  node defaults into metadata-managed resource policy.
+- **Replica transport and catch-up** — stream bounded entry batches and resume
+  from follower progress without changing ordering authority.
+- **Replication-aware checkpoints** — retain logical sequence identity when
+  local snapshots authorize WAL reclamation.
+- **Leader-side commit tracking** — distinguish local append from replication
+  and quorum commit before acknowledging durable publication.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
 
 ### Deliberately later
 
-Partitioning, ownership transfer, leader election, replication, and quorum
-durability come only after the local durability and storage lifecycle contracts
-are explicit and tested. These phases will introduce split brain, replica lag,
-and recovery-source authority rather than merely adding remote APIs.
+Leader election, safe promotion, ownership transfer, partitioning, and quorum
+durability remain later phases. v0.26 does not call a follower copy committed or
+allow it to serve traffic.
 
 ## Metadata Service
 

@@ -14,3 +14,5 @@ ordering, authority, or failure handling.
   progression, fenced recovery, readiness publication, and deactivation.
 - [Data-plane operation lifecycle](data-plane-operation-lifecycle.md) — guarded
   request admission, WAL delegation, and deterministic closure race ordering.
+- [Follower WAL append flow](follower-wal-append-flow.md) — lineage, sequence,
+  retry, conflict, and durable leader-epoch fencing decisions.
