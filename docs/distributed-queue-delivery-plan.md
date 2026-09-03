@@ -15,6 +15,11 @@ Goal: finish bounded transport without implying automatic replication.
 
 ## Phase 1 — v0.27.1: Replication Performance Baseline
 
+Status: complete for the architecture available at v0.27. Raw results and
+explicit dependency-bound matrix entries are recorded under
+`benchmarks/v0.27.1/`; snapshot-install and representative end-to-end network
+profiles become required when those protocols exist.
+
 Limitation solved: the design does not know whether record-by-record force,
 encoding, locks, HTTP, snapshot I/O, or partition density is the actual
 bottleneck.

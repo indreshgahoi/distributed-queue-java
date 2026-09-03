@@ -14,12 +14,12 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.26.0 — ordered epoch-fenced follower WAL protocol.
+Latest release: v0.27.0 — bounded replica transport and catch-up.
 
-Current development: v0.27.0 — bounded replica transport and catch-up. Queue
-nodes expose an internal bounded-batch follower endpoint, persist received
-records through the v0.26 protocol, and provide a one-cycle resumable catch-up
-service and HTTP client.
+Current development: v0.27.1 — replication performance baseline. Checked-in
+JMH results isolate per-record force cost, a benchmark-only one-force batch,
+segment rotation, snapshot interference, producer contention, and physical
+partition startup density without changing production durability semantics.
 
 This is a replication storage primitive, not replicated queue availability.
 Transport, leader election, quorum commit, follower promotion, catch-up, and
@@ -167,26 +167,20 @@ distributed system.
 
 ### Current milestone
 
-**v0.27.0 — Bounded replica transport and catch-up**
+**v0.27.1 — Replication performance baseline**
 
-Move ordered replication across a real node-to-node boundary using bounded
-batches. Preserve exact-retry safety after ambiguous HTTP responses and expose
-the expected sequence when the sender and follower disagree.
+Measure the real cost of the current storage boundaries before designing the
+durable logical replicated log. The baseline shows that follower batch latency
+scales with its per-record force count and justifies a tested durable batch
+append boundary in v0.28. See
+[the checked-in results](docs/benchmarks/v0.27.1/README.md).
 
 ### Next decision area
 
-After v0.27.0, the repository will be reviewed again before selecting a
-milestone. Likely candidates are:
-
-- **Replication-aware checkpoints** — retain logical sequence identity when
-  local snapshots authorize WAL reclamation.
-- **Leader-side commit tracking** — distinguish local append from replication
-  and quorum commit before acknowledging durable publication.
-- **Replica membership** — define which nodes should hold each partition before
-  enabling automatic replication scheduling.
-
-Selection will be based on correctness value, architectural dependency,
-failure exposure, operational need, and distributed-systems learning value.
+The next planned milestone is **v0.28 — durable logical replicated log**:
+persist log index and term with every entry, introduce replica hard state, and
+carry the last included index and term through snapshots. Quorum acknowledgement
+and elections remain deliberately later phases.
 
 ### Deliberately later
 

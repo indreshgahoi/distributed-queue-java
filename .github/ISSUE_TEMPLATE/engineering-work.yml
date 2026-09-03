@@ -1,0 +1,176 @@
+name: Engineering milestone work
+description: Plan correctness, durability, replication, performance, or architecture work
+title: ""
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for planned engineering work. Describe the limitation and
+        invariant before proposing implementation. Keep target architecture
+        separate from guarantees already implemented by the repository.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Select the primary architectural area.
+      options:
+        - Storage and durability
+        - Replication
+        - Consensus and leadership
+        - Partitioning and routing
+        - Metadata and control plane
+        - Runtime lifecycle
+        - Performance and benchmarking
+        - Operations and observability
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What real limitation of the current system does this solve?
+      placeholder: Describe the current limitation, who or what it affects, and why it matters now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-behavior
+    attributes:
+      label: Current behavior
+      description: Explain what the implementation guarantees today and where that behavior is defined.
+      placeholder: Include links to relevant code, semantics, ADRs, tests, or architecture appendices.
+    validations:
+      required: true
+
+  - type: textarea
+    id: invariant
+    attributes:
+      label: Target invariant
+      description: State the property that must remain true across concurrency, retry, and failure.
+      placeholder: "Example: A client success is returned only after the entry is durable on a voting majority."
+    validations:
+      required: true
+
+  - type: textarea
+    id: authority
+    attributes:
+      label: Authority and state transitions
+      description: Identify the durable authority, linearization or commit point, and affected state transitions.
+      placeholder: |
+        Authority:
+        Commit or linearization point:
+        State before:
+        State after:
+        Stale actor and fencing mechanism:
+    validations:
+      required: true
+
+  - type: textarea
+    id: failure-scenarios
+    attributes:
+      label: Failure scenarios
+      description: Describe required behavior for applicable failures. Mark irrelevant cases explicitly.
+      placeholder: |
+        - Process crash:
+        - Node loss:
+        - Disk or force failure:
+        - Network timeout or partition:
+        - Duplicate request:
+        - Stale leader or owner:
+        - Partial completion:
+        - Recovery or restart:
+    validations:
+      required: true
+
+  - type: textarea
+    id: non-goals
+    attributes:
+      label: Non-goals
+      description: What related behavior is deliberately excluded from this issue?
+      placeholder: List boundaries that prevent accidental scope expansion or unsupported guarantees.
+    validations:
+      required: true
+
+  - type: textarea
+    id: tests
+    attributes:
+      label: Required tests
+      description: List deterministic unit, concurrency, integration, crash, corruption, or fault-injection tests.
+      placeholder: Describe tests in terms of observable invariants and failure outcomes.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: benchmark-impact
+    attributes:
+      label: Benchmark impact
+      description: Does this work affect a hot path, resource scaling, recovery time, or durability I/O?
+      options:
+        - Benchmark required before implementation
+        - Benchmark required before release
+        - Existing baseline comparison required
+        - No material performance impact
+    validations:
+      required: true
+
+  - type: textarea
+    id: benchmark-plan
+    attributes:
+      label: Benchmark plan or justification
+      description: Define workloads and percentiles, or explain why a benchmark is unnecessary.
+      placeholder: Include payload sizes, concurrency, batch sizes, environment metadata, and p50/p95/p99/p99.9/max when applicable.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: documentation
+    attributes:
+      label: Documentation impact
+      description: Select every artifact that must be reviewed or updated.
+      options:
+        - label: `docs/semantics.md`
+        - label: `docs/failure-scenarios.md`
+        - label: `docs/trade-offs.md`
+        - label: Architecture handbook or delivery plan
+        - label: Architecture or lifecycle diagram
+        - label: ADR
+        - label: README roadmap or operating instructions
+        - label: Benchmark raw results and interpretation
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and sequencing
+      description: Identify prerequisite issues, milestones, formats, protocols, or external decisions.
+      placeholder: Explain why this work is safe to begin now and what must come afterward.
+
+  - type: textarea
+    id: exit-criteria
+    attributes:
+      label: Exit criteria
+      description: What observable evidence proves the work is complete?
+      placeholder: |
+        - Invariant tests pass
+        - Full Maven regression passes
+        - Required failure tests pass
+        - Benchmark evidence is checked in
+        - Documentation reflects implemented guarantees
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: readiness
+    attributes:
+      label: Readiness review
+      options:
+        - label: I distinguished current guarantees from target behavior.
+          required: true
+        - label: I identified the durable authority and failure behavior.
+          required: true
+        - label: I listed explicit non-goals and did not imply unimplemented guarantees.
+          required: true
