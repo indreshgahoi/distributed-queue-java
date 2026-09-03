@@ -16,6 +16,8 @@ queue:
     registration-lease-duration: ${NODE_REGISTRATION_LEASE_DURATION:PT30S}
     heartbeat-delay: ${NODE_HEARTBEAT_DELAY:PT10S}
     lease-duration: ${PROVISIONING_LEASE_DURATION:PT30S}
+    http-connect-timeout: ${QUEUE_NODE_HTTP_CONNECT_TIMEOUT:PT2S}
+    http-request-timeout: ${QUEUE_NODE_HTTP_REQUEST_TIMEOUT:PT5S}
     poll-delay: ${PROVISIONING_POLL_DELAY:PT1S}
     runtime-poll-delay: ${RUNTIME_PARTITION_POLL_DELAY:PT1S}
     wal-segment-bytes: ${QUEUE_WAL_SEGMENT_BYTES:16777216}

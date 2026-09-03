@@ -127,6 +127,30 @@ public final class OrderedFollowerReplicaLog
     }
 
     @Override
+    public synchronized ReplicaBatchAppendResult appendBatch(
+            List<ReplicatedWalEntry> entries
+    ) {
+        ensureWritable();
+        Objects.requireNonNull(entries, "entries");
+
+        int appended = 0;
+        int alreadyPresent = 0;
+        for (ReplicatedWalEntry entry : List.copyOf(entries)) {
+            ReplicaAppendResult result = append(entry);
+            if (result == ReplicaAppendResult.APPENDED) {
+                appended++;
+            } else {
+                alreadyPresent++;
+            }
+        }
+        return new ReplicaBatchAppendResult(
+                records.size(),
+                appended,
+                alreadyPresent
+        );
+    }
+
+    @Override
     public StorageLineage lineage() {
         return lineage;
     }

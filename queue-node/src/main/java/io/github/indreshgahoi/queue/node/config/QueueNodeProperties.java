@@ -19,9 +19,21 @@ public record QueueNodeProperties(
         @NotNull Path storageRoot,
         @NotNull Duration registrationLeaseDuration,
         @NotNull Duration leaseDuration,
+        @NotNull Duration httpConnectTimeout,
+        @NotNull Duration httpRequestTimeout,
         @Positive long walSegmentBytes,
         @Positive int maxMessageBytes,
         @Positive int maxRetainedMessages,
         @Positive long maxRetainedBytes
 ) {
+    public QueueNodeProperties {
+        if (httpConnectTimeout.isZero()
+                || httpConnectTimeout.isNegative()
+                || httpRequestTimeout.isZero()
+                || httpRequestTimeout.isNegative()) {
+            throw new IllegalArgumentException(
+                    "Queue-node HTTP timeouts must be positive"
+            );
+        }
+    }
 }

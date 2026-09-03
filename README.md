@@ -14,11 +14,12 @@ behave under failure.
 
 ## Current Scope
 
-Latest release: v0.25.0 — stable data-plane routing gateway.
+Latest release: v0.26.0 — ordered epoch-fenced follower WAL protocol.
 
-Current development: v0.26.0 — ordered follower WAL protocol. A follower now
-accepts lineage-bound WAL entries in logical sequence order, durably fences
-stale leader epochs, and handles exact retries without duplicating records.
+Current development: v0.27.0 — bounded replica transport and catch-up. Queue
+nodes expose an internal bounded-batch follower endpoint, persist received
+records through the v0.26 protocol, and provide a one-cycle resumable catch-up
+service and HTTP client.
 
 This is a replication storage primitive, not replicated queue availability.
 Transport, leader election, quorum commit, follower promotion, catch-up, and
@@ -105,6 +106,14 @@ The v0.25 routing decision is captured in
 
 ## Roadmap
 
+The long-term partition, replication, quorum, election, and failure-recovery
+model is defined in the
+[distributed queue target architecture](docs/distributed-queue-target-architecture.md).
+Detailed learning appendices and diagrams are indexed in the
+[distributed queue architecture handbook](docs/architecture/README.md).
+The reviewable milestone and issue breakdown is maintained in the
+[distributed queue delivery plan](docs/distributed-queue-delivery-plan.md).
+
 The roadmap is organized around correctness problems, not feature parity with
 existing brokers. Each milestone must identify a concrete limitation, define
 its invariants and failure semantics, and preserve a coherent path toward a
@@ -153,27 +162,28 @@ distributed system.
     reject overload before WAL mutation and survive recovery.
 16. **Stable data-plane routing** — a gateway resolves current READY authority,
     forwards once, and preserves ambiguous mutation outcomes.
+17. **Ordered follower storage** — lineage, logical sequence, idempotent retry,
+    conflict detection, and durable leader-epoch fencing protect follower WALs.
 
 ### Current milestone
 
-**v0.26.0 — Ordered follower WAL protocol**
+**v0.27.0 — Bounded replica transport and catch-up**
 
-Establish the first distributed-storage invariant: one lineage-bound follower
-accepts only the next logical WAL sequence from a non-stale leader epoch. Exact
-retries are idempotent, conflicts and gaps fail closed, and the highest observed
-epoch survives restart.
+Move ordered replication across a real node-to-node boundary using bounded
+batches. Preserve exact-retry safety after ambiguous HTTP responses and expose
+the expected sequence when the sender and follower disagree.
 
 ### Next decision area
 
-After v0.26.0, the repository will be reviewed again before selecting a
+After v0.27.0, the repository will be reviewed again before selecting a
 milestone. Likely candidates are:
 
-- **Replica transport and catch-up** — stream bounded entry batches and resume
-  from follower progress without changing ordering authority.
 - **Replication-aware checkpoints** — retain logical sequence identity when
   local snapshots authorize WAL reclamation.
 - **Leader-side commit tracking** — distinguish local append from replication
   and quorum commit before acknowledging durable publication.
+- **Replica membership** — define which nodes should hold each partition before
+  enabling automatic replication scheduling.
 
 Selection will be based on correctness value, architectural dependency,
 failure exposure, operational need, and distributed-systems learning value.
@@ -181,8 +191,8 @@ failure exposure, operational need, and distributed-systems learning value.
 ### Deliberately later
 
 Leader election, safe promotion, ownership transfer, partitioning, and quorum
-durability remain later phases. v0.26 does not call a follower copy committed or
-allow it to serve traffic.
+durability remain later phases. v0.27 does not call a follower copy committed,
+select replicas automatically, or allow a follower to serve traffic.
 
 ## Metadata Service
 

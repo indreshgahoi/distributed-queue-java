@@ -3,6 +3,13 @@
 These diagrams explain cross-component protocols whose correctness depends on
 ordering, authority, or failure handling.
 
+For the complete learning-oriented design, start with the
+[architecture handbook](../architecture/README.md).
+
+- [Distributed target architecture](distributed-target-architecture.md) —
+  target control/data-plane boundary, multi-tenant node layout, replica state,
+  and partition-level node-failure recovery.
+
 - [Provisioning claim sequence](provisioning-claim-sequence.md) — interactions
   between the queue node, metadata service, PostgreSQL, and local WAL storage.
 - [Provisioning claim decision flow](provisioning-claim-flow.md) — decisions in
@@ -16,3 +23,5 @@ ordering, authority, or failure handling.
   request admission, WAL delegation, and deterministic closure race ordering.
 - [Follower WAL append flow](follower-wal-append-flow.md) — lineage, sequence,
   retry, conflict, and durable leader-epoch fencing decisions.
+- [Replica catch-up sequence](replica-catch-up-sequence.md) — bounded leader
+  reads, node-to-node transport, forced follower progress, and retry behavior.

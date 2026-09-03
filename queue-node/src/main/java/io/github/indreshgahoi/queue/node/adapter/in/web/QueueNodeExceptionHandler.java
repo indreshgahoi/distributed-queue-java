@@ -3,6 +3,10 @@ package io.github.indreshgahoi.queue.node.adapter.in.web;
 import io.github.indreshgahoi.queue.MessageTooLargeException;
 import io.github.indreshgahoi.queue.QueueCapacityExceededException;
 import io.github.indreshgahoi.queue.node.domain.exception.RuntimePartitionUnavailableException;
+import io.github.indreshgahoi.queue.storage.replication.ReplicaConflictException;
+import io.github.indreshgahoi.queue.storage.replication.ReplicaLineageMismatchException;
+import io.github.indreshgahoi.queue.storage.replication.ReplicaSequenceException;
+import io.github.indreshgahoi.queue.storage.replication.StaleLeaderEpochException;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -19,6 +23,33 @@ import java.net.URI;
 @RestControllerAdvice
 @Slf4j
 final class QueueNodeExceptionHandler {
+    @ExceptionHandler({
+            ReplicaSequenceException.class,
+            ReplicaConflictException.class,
+            ReplicaLineageMismatchException.class,
+            StaleLeaderEpochException.class
+    })
+    ResponseEntity<ProblemDetail> replicationConflict(
+            RuntimeException exception
+    ) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(
+                HttpStatus.CONFLICT,
+                exception.getMessage()
+        );
+        problem.setType(URI.create(
+                "urn:distributed-queue:replication-conflict"
+        ));
+        if (exception instanceof ReplicaSequenceException sequence) {
+            problem.setProperty("expectedSequence", sequence.expected());
+            problem.setProperty("suppliedSequence", sequence.supplied());
+        }
+        if (exception instanceof StaleLeaderEpochException epoch) {
+            problem.setProperty("currentLeaderEpoch", epoch.current());
+            problem.setProperty("suppliedLeaderEpoch", epoch.supplied());
+        }
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(problem);
+    }
+
     @ExceptionHandler(RuntimePartitionUnavailableException.class)
     ResponseEntity<ProblemDetail> unavailable(
             RuntimePartitionUnavailableException exception

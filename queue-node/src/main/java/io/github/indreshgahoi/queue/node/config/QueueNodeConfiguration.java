@@ -9,18 +9,38 @@ import io.github.indreshgahoi.queue.node.application.service.NodeRegistrationMan
 import io.github.indreshgahoi.queue.node.application.service.ProvisioningReconciler;
 import io.github.indreshgahoi.queue.node.application.service.QueueDataPlaneService;
 import io.github.indreshgahoi.queue.node.application.service.RuntimePartitionManager;
+import io.github.indreshgahoi.queue.node.application.service.FollowerReplicationService;
+import io.github.indreshgahoi.queue.node.application.port.out.FollowerReplicaLogProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestClient;
+import org.springframework.http.client.ClientHttpRequestFactory;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 
+import java.net.http.HttpClient;
 import java.time.Clock;
 
 @Configuration(proxyBeanMethods = false)
 class QueueNodeConfiguration {
 
     @Bean
-    RestClient.Builder restClientBuilder() {
-        return RestClient.builder();
+    RestClient.Builder restClientBuilder(
+            ClientHttpRequestFactory requestFactory
+    ) {
+        return RestClient.builder().requestFactory(requestFactory);
+    }
+
+    @Bean
+    ClientHttpRequestFactory queueNodeRequestFactory(
+            QueueNodeProperties properties
+    ) {
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(properties.httpConnectTimeout())
+                .build();
+        JdkClientHttpRequestFactory factory =
+                new JdkClientHttpRequestFactory(client);
+        factory.setReadTimeout(properties.httpRequestTimeout());
+        return factory;
     }
 
     @Bean
@@ -79,5 +99,12 @@ class QueueNodeConfiguration {
             RuntimePartitionManager partitions
     ) {
         return new QueueDataPlaneService(partitions);
+    }
+
+    @Bean
+    FollowerReplicationService followerReplicationService(
+            FollowerReplicaLogProvider logs
+    ) {
+        return new FollowerReplicationService(logs);
     }
 }

@@ -907,3 +907,35 @@ yet integrated with snapshots.
 - snapshot-carried logical indexes and replication-aware reclamation;
 - leader commit index, quorum acknowledgement, and replica membership;
 - election, promotion, log truncation, and divergence repair.
+
+## v0.27.0 — Bounded Replica Transport and Catch-Up
+
+### Decision
+
+Expose the v0.26 follower protocol through a bounded internal queue-node HTTP
+endpoint. Represent a batch with one lineage, epoch, first sequence, and a
+consecutive record list. Provide an HTTP client and a one-attempt catch-up
+service behind application ports, but do not invent replica membership.
+
+### Gain
+
+- WAL records can cross a real process and node boundary;
+- ambiguous response retries remain idempotent across an entire batch;
+- bounded work limits memory, request size, and failure blast radius;
+- partial durable progress is observable and safely resumable;
+- transport remains separate from follower storage correctness.
+
+### Cost
+
+- batches are not atomic and may commit a prefix;
+- follower logs are opened lazily and retained until node shutdown;
+- the internal endpoint is not yet authenticated;
+- there is no automatic scheduler because metadata has no replica membership;
+- logical catch-up still requires complete retained WAL history.
+
+### Deferred
+
+- replication-aware snapshots and historical sequence retention;
+- membership, automatic scheduling, lag metrics, and backoff orchestration;
+- quorum acknowledgement and leader commit index;
+- election, promotion, truncation, and repair.

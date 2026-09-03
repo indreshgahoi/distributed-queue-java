@@ -1610,3 +1610,42 @@ Required behavior:
 
     fail replica-log initialization closed
     do not guess a logical sequence from retained physical records
+
+## F98 — Follower Response Is Lost After a Batch Commits
+
+The follower forces all records but the leader loses the HTTP response.
+
+Required behavior:
+
+    allow the leader to resend the unchanged batch
+    report its records as already present
+    do not duplicate WAL records
+
+## F99 — Batch Fails After a Durable Prefix
+
+Some entries are forced before follower storage fails and poisons the writer.
+
+Required behavior:
+
+    never claim batch atomicity
+    recover the follower storage before another attempt
+    let an unchanged retry skip the durable prefix and continue
+
+## F100 — Replica Batch Exceeds Receiver Bounds
+
+A sender supplies more than 256 records or more than 1 MiB of payload.
+
+Required behavior:
+
+    reject before opening or mutating follower storage
+    do not partially accept the oversized request
+
+## F101 — Catch-Up Source No Longer Retains Requested Sequence
+
+The follower requests history older than the leader's reclaimed WAL suffix.
+
+Required behavior:
+
+    fail catch-up explicitly
+    do not silently start from the oldest retained physical record
+    require a later replication-aware snapshot transfer milestone

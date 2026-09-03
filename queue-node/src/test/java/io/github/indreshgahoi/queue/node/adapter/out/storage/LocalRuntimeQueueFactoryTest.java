@@ -48,6 +48,8 @@ class LocalRuntimeQueueFactoryTest {
                 storageRoot,
                 Duration.ofSeconds(30),
                 Duration.ofSeconds(30),
+                Duration.ofSeconds(2),
+                Duration.ofSeconds(5),
                 1024,
                 1024,
                 100,

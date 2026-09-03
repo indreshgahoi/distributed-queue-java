@@ -2630,3 +2630,50 @@ acknowledgement policy, lag tracking, catch-up snapshots, promotion, truncation,
 or divergence repair. The initial implementation requires complete WAL history;
 it refuses a reclaimed suffix because physical `WalPosition` is not a logical
 replication index.
+
+## v0.27.0 — Bounded Replica Transport and Catch-Up
+
+### G230 — Replica transport batches are bounded
+
+One internal request contains between one and 256 consecutive WAL records and
+at most 1 MiB of combined UTF-8 payload. Bounds are checked before follower
+storage is opened or mutated.
+
+### G231 — A batch cannot encode an internal sequence gap
+
+The wire request carries one positive `firstSequence`. Record position within
+the list derives every entry sequence. The entire request carries one lineage
+and one positive leader epoch.
+
+### G232 — Successful responses report durable follower progress
+
+The follower responds only after every reported appended record has crossed the
+existing forced-WAL boundary. The response includes accepted-through sequence,
+new append count, and already-present count.
+
+### G233 — Batch application is incremental, not atomic
+
+A failure may occur after a prefix is durable. Retrying the unchanged batch is
+safe because that prefix returns `ALREADY_PRESENT` and application resumes at
+the first missing sequence.
+
+### G234 — Catch-up work is bounded to one remote attempt
+
+`ReplicaCatchUpService.runOnce` reads at most its configured limit and performs
+at most one follower request. Scheduling, retry delay, and membership are
+outside this operation, preventing an unavailable follower from creating an
+unbounded loop or holding a queue mutation lock. Queue-node outbound HTTP has
+positive configurable connect and request timeouts.
+
+### G235 — Sequence disagreement is explicit
+
+HTTP 409 represents stale epoch, lineage mismatch, sequence gap, or conflicting
+history. Gap responses include supplied and expected sequence; stale-epoch
+responses include supplied and current epoch.
+
+### Explicit non-guarantees
+
+v0.27 does not define replica membership or automatically schedule catch-up.
+It does not provide quorum acknowledgement, commit index, election, promotion,
+divergence repair, or replication-aware WAL reclamation. A leader replication
+source must fail if its requested logical history is no longer retained.

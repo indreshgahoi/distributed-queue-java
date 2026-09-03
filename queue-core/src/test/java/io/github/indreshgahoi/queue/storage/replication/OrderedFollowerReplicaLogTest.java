@@ -237,6 +237,25 @@ class OrderedFollowerReplicaLogTest {
         );
     }
 
+    @Test
+    void batchReportsNewAndAlreadyPresentEntries() {
+        InMemoryWriteAheadLog wal =
+                new InMemoryWriteAheadLog(LINEAGE);
+        OrderedFollowerReplicaLog replica = replica(wal);
+        replica.append(entry(3, 1, record("one")));
+
+        ReplicaBatchAppendResult result = replica.appendBatch(List.of(
+                entry(3, 1, record("one")),
+                entry(3, 2, record("two")),
+                entry(3, 3, record("three"))
+        ));
+
+        assertEquals(3, result.acceptedThroughSequence());
+        assertEquals(2, result.appendedEntries());
+        assertEquals(1, result.alreadyPresentEntries());
+        assertEquals(3, wal.readAll().size());
+    }
+
     private OrderedFollowerReplicaLog replica(
             WriteAheadLog wal
     ) {

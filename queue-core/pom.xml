@@ -6,7 +6,7 @@
     <parent>
         <groupId>io.github.indreshgahoi</groupId>
         <artifactId>distributed-queue-parent</artifactId>
-        <version>0.26.0-SNAPSHOT</version>
+        <version>0.27.0-SNAPSHOT</version>
     </parent>
     <artifactId>queue-core</artifactId>
     <name>Distributed Queue Core</name>
