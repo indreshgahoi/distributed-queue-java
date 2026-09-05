@@ -89,6 +89,25 @@ public final class SnapshotCompactionCoordinator {
         Optional<WalPosition> current =
                 boundaryTracker.currentBoundary();
 
+        Optional<QueueSnapshot> currentSnapshot = latestSnapshot();
+        if (currentSnapshot.isPresent()) {
+            QueueSnapshot authority = currentSnapshot.get();
+            if (snapshot.lastIncludedIndex()
+                    < authority.lastIncludedIndex()) {
+                throw new IllegalArgumentException(
+                        "Snapshot logical index is older than current authority"
+                );
+            }
+            if (snapshot.lastIncludedIndex()
+                    == authority.lastIncludedIndex()
+                    && snapshot.lastIncludedTerm()
+                    != authority.lastIncludedTerm()) {
+                throw new IllegalArgumentException(
+                        "Snapshot changes the term of an existing logical boundary"
+                );
+            }
+        }
+
         if (current.isPresent()
                 && candidate.compareTo(current.get()) < 0
         ) {

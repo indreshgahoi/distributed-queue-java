@@ -5,6 +5,8 @@ import io.github.indreshgahoi.queue.node.config.QueueNodeProperties;
 import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.replication.FollowerReplicaLog;
 import io.github.indreshgahoi.queue.storage.replication.OrderedFollowerReplicaLog;
+import io.github.indreshgahoi.queue.storage.replication.LogPoint;
+import io.github.indreshgahoi.queue.storage.snapshot.FileQueueSnapshotStore;
 import io.github.indreshgahoi.queue.storage.wal.SegmentedFileWriteAheadLog;
 import jakarta.annotation.PreDestroy;
 import org.springframework.stereotype.Component;
@@ -46,20 +48,33 @@ final class LocalFollowerReplicaLogProvider
     }
 
     private FollowerReplicaLog openNew(StorageLineage lineage) {
-        Path partitionRoot = storageRoot
-                .resolve(lineage.queueId().toString())
-                .resolve(lineage.generationId().toString())
-                .resolve("partition-" + lineage.partitionId());
+        LocalPartitionStorageLayout storage =
+                LocalPartitionStorageLayout.resolve(storageRoot, lineage);
         SegmentedFileWriteAheadLog wal =
                 new SegmentedFileWriteAheadLog(
-                        partitionRoot.resolve("wal"),
+                        storage.walDirectory(),
                         walSegmentBytes,
                         lineage
                 );
         try {
+            new FileQueueSnapshotStore(
+                    storage.snapshotFile()
+            ).loadLatest().ifPresent(snapshot -> {
+                if (!lineage.equals(snapshot.storageLineage())) {
+                    throw new IllegalStateException(
+                            "Snapshot lineage does not match follower WAL"
+                    );
+                }
+                    wal.restoreSnapshotBoundary(
+                            new LogPoint(
+                                    snapshot.lastIncludedIndex(),
+                                    snapshot.lastIncludedTerm()
+                            )
+                    );
+            });
             return new OrderedFollowerReplicaLog(
                     wal,
-                    partitionRoot.resolve("replica-leader-epoch.bin")
+                    storage.replicaHardStateFile()
             );
         } catch (RuntimeException failure) {
             wal.close();

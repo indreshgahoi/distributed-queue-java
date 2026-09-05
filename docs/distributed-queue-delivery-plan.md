@@ -45,6 +45,8 @@ reclamation and does not store the leader term with each entry.
 - encode `logIndex` and `logTerm` atomically with each replicated WAL entry;
 - expose bounded reads by logical index;
 - persist replica hard state: current term, vote, and commit index;
+- recover `lastApplied` from the durable snapshot plus committed replay rather
+  than persisting a marker that could outlive its in-memory state;
 - extend snapshots with last included index and term;
 - define upgrade policy explicitly; no migration is required for this learning
   repository unless chosen before implementation;

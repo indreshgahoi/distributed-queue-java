@@ -1,5 +1,7 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.replication.LogEntry;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -15,7 +17,7 @@ import java.util.zip.CRC32C;
  * Frame layout:
  *
  * +----------------------+----------------------+----------------+
- * | payload length       | serialized record    | CRC32C         |
+ * | payload length       | index, term, record  | CRC32C         |
  * | 4 bytes              | N bytes              | 4 bytes        |
  * +----------------------+----------------------+----------------+
  */
@@ -30,31 +32,45 @@ final class WalFrameCodec {
     private static final int MAX_RECORD_SIZE =
             16 * 1024 * 1024;
 
+    private static final int ENTRY_METADATA_BYTES =
+            Long.BYTES * 2 + Integer.BYTES;
+
     private static final String WRITE_SEPARATOR = "|";
     private static final String READ_SEPARATOR = "\\|";
 
-    ByteBuffer encode(WalRecord record) {
+    ByteBuffer encode(LogEntry entry) {
         Objects.requireNonNull(
-                record,
-                "record"
+                entry,
+                "entry"
         );
 
-        byte[] payload =
-                serialize(record)
+        byte[] recordBytes =
+                serialize(entry.record())
                         .getBytes(StandardCharsets.UTF_8);
 
-        validateRecordSize(payload.length);
+        validateRecordSize(recordBytes.length);
+
+        int payloadLength =
+                ENTRY_METADATA_BYTES + recordBytes.length;
+
+        ByteBuffer payload =
+                ByteBuffer.allocate(payloadLength);
+
+        payload.putLong(entry.logIndex());
+        payload.putLong(entry.logTerm());
+        payload.putInt(recordBytes.length);
+        payload.put(recordBytes);
 
         ByteBuffer frame =
                 ByteBuffer.allocate(
                         LENGTH_PREFIX_BYTES
-                                + payload.length
+                                + payloadLength
                                 + CHECKSUM_BYTES
                 );
 
-        frame.putInt(payload.length);
-        frame.put(payload);
-        frame.putInt(calculateChecksum(payload));
+        frame.putInt(payloadLength);
+        frame.put(payload.array());
+        frame.putInt(calculateChecksum(payload.array()));
         frame.flip();
 
         return frame;
@@ -138,15 +154,31 @@ final class WalFrameCodec {
                 frameStart
         );
 
+        payloadBuffer.flip();
+        long logIndex = payloadBuffer.getLong();
+        long logTerm = payloadBuffer.getLong();
+        int recordLength = payloadBuffer.getInt();
+
+        if (recordLength <= 0
+                || recordLength != payloadBuffer.remaining()) {
+            throw new WalException(
+                    "Invalid WAL record length at offset " + frameStart
+            );
+        }
+
+        byte[] recordBytes = new byte[recordLength];
+        payloadBuffer.get(recordBytes);
+
         String serialized =
-                new String(
-                        payloadBuffer.array(),
-                        StandardCharsets.UTF_8
-                );
+                new String(recordBytes, StandardCharsets.UTF_8);
 
         return DecodedFrame.complete(
                 frameStart,
-                deserialize(serialized)
+                new LogEntry(
+                        logIndex,
+                        logTerm,
+                        deserialize(serialized)
+                )
         );
     }
 
@@ -276,14 +308,14 @@ final class WalFrameCodec {
     }
 
     private static void validateFrameLength(int payloadLength) {
-        if (payloadLength <= 0) {
+        if (payloadLength <= ENTRY_METADATA_BYTES) {
             throw new WalException(
                     "Invalid WAL frame length: "
                             + payloadLength
             );
         }
 
-        if (payloadLength > MAX_RECORD_SIZE) {
+        if (payloadLength > MAX_RECORD_SIZE + ENTRY_METADATA_BYTES) {
             throw new WalException(
                     "WAL frame exceeds maximum size: "
                             + payloadLength

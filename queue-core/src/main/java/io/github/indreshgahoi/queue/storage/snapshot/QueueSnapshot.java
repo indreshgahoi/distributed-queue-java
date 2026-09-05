@@ -9,6 +9,8 @@ import java.util.Objects;
 public record QueueSnapshot(
         StorageLineage storageLineage,
         WalPosition walPosition,
+        long lastIncludedIndex,
+        long lastIncludedTerm,
         List<ReadySnapshotEntry> ready,
         List<InFlightSnapshotEntry> inFlight,
         List<DelayedSnapshotEntry> delayed,
@@ -17,9 +19,38 @@ public record QueueSnapshot(
     public QueueSnapshot {
         Objects.requireNonNull(storageLineage, "storageLineage");
         Objects.requireNonNull(walPosition, "walPosition");
+        boolean emptyBoundary =
+                lastIncludedIndex == 0 && lastIncludedTerm == 0;
+        boolean entryBoundary =
+                lastIncludedIndex > 0 && lastIncludedTerm > 0;
+        if (!emptyBoundary && !entryBoundary) {
+            throw new IllegalArgumentException(
+                    "Snapshot index and term must both be zero or positive"
+            );
+        }
         ready = List.copyOf(ready);
         inFlight = List.copyOf(inFlight);
         delayed = List.copyOf(delayed);
         deadLetters = List.copyOf(deadLetters);
+    }
+
+    public QueueSnapshot(
+            StorageLineage storageLineage,
+            WalPosition walPosition,
+            List<ReadySnapshotEntry> ready,
+            List<InFlightSnapshotEntry> inFlight,
+            List<DelayedSnapshotEntry> delayed,
+            List<DeadLetterSnapshotEntry> deadLetters
+    ) {
+        this(
+                storageLineage,
+                walPosition,
+                0,
+                0,
+                ready,
+                inFlight,
+                delayed,
+                deadLetters
+        );
     }
 }

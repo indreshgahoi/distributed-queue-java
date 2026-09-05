@@ -1,8 +1,9 @@
 package io.github.indreshgahoi.queue.storage.wal;
 
+import io.github.indreshgahoi.queue.storage.replication.LogEntry;
 record DecodedFrame(
         FrameReadStatus status,
-        WalRecord record,
+        LogEntry entry,
         long frameStart
 ) {
 
@@ -18,29 +19,29 @@ record DecodedFrame(
         }
 
         if (status == FrameReadStatus.COMPLETE
-                && record == null) {
+                && entry == null) {
 
             throw new IllegalArgumentException(
-                    "COMPLETE frame must contain a WalRecord"
+                    "COMPLETE frame must contain a LogEntry"
             );
         }
 
         if (status != FrameReadStatus.COMPLETE
-                && record != null) {
+                && entry != null) {
 
             throw new IllegalArgumentException(
-                    "Incomplete frame must not contain a WalRecord"
+                    "Incomplete frame must not contain a LogEntry"
             );
         }
     }
 
     static DecodedFrame complete(
             long frameStart,
-            WalRecord record
+            LogEntry entry
     ) {
         return new DecodedFrame(
                 FrameReadStatus.COMPLETE,
-                record,
+                entry,
                 frameStart
         );
     }

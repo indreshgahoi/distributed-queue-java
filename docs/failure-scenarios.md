@@ -1649,3 +1649,81 @@ Required behavior:
     fail catch-up explicitly
     do not silently start from the oldest retained physical record
     require a later replication-aware snapshot transfer milestone
+
+## F102 — Batch Write Fails After a Complete Entry Prefix
+
+Several frames are complete when a later frame write or the group force fails.
+
+Required behavior:
+
+    do not report the requested durable-through index
+    poison the WAL instance until restart
+    recover only checksum-valid complete frames
+    remove only a torn tail in the active segment
+    allow an unchanged logical retry to skip the recovered identical prefix
+
+## F103 — Replicated Batch Conflicts with Retained History
+
+A leader supplies the same index with a different term or queue operation.
+
+Required behavior:
+
+    reject the complete request before writing any new frame
+    preserve the existing durable suffix
+    do not truncate automatically
+    distinguish conflict from a storage failure
+
+## F104 — Restart Finds a Logical Gap Across WAL Segments
+
+Checksummed entries are individually readable, but their indexes are not
+consecutive across a frame or segment boundary.
+
+Required behavior:
+
+    fail startup closed
+    do not infer continuity from segment names or byte positions
+    do not expose queue state from the inconsistent history
+
+## F105 — Snapshot Boundary Term Disagrees with Retained WAL
+
+The snapshot names `(lastIncludedIndex,lastIncludedTerm)`, while a retained
+entry at that index carries another term.
+
+Required behavior:
+
+    reject the snapshot
+    do not replay or reclaim WAL using that snapshot
+    keep the partition unavailable until authoritative storage is repaired
+
+## F106 — Reclaimed Prefix Has No Authoritative Logical Boundary
+
+The oldest retained WAL entry begins above index one and no valid snapshot can
+prove the preceding index and term.
+
+Required behavior:
+
+    fail recovery rather than guessing the compacted boundary
+    do not reset the next index from retained record count
+    require restoration of an authoritative snapshot
+
+## F107 — Hard State Claims Commit Beyond Local Durability
+
+`replica-hard-state.bin` contains a commit index greater than the last complete
+locally durable log index.
+
+Required behavior:
+
+    reject hard-state load and partition readiness
+    never apply entries based on the impossible commit boundary
+    do not reduce the stored commit index automatically
+
+## F108 — Hard-State Candidate or Directory Force Fails
+
+Writing, forcing, promoting, or directory-forcing a hard-state candidate fails.
+
+Required behavior:
+
+    never update in-memory authority before successful durable publication
+    preserve the prior authority when failure occurs before promotion
+    treat post-promotion directory-force failure as indeterminate
+    require reload before further authority-changing operations

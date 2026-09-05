@@ -23,14 +23,14 @@ final class LocalQueueStorageProvisioner
 
     @Override
     public void provision(ProvisioningAssignment assignment) {
-        Path walDirectory = storageRoot
-                .resolve(assignment.queueId().toString())
-                .resolve(assignment.generationId().toString())
-                .resolve("partition-" + assignment.partitionId())
-                .resolve("wal");
+        LocalPartitionStorageLayout storage =
+                LocalPartitionStorageLayout.resolve(
+                        storageRoot,
+                        assignment.lineage()
+                );
         try (SegmentedFileWriteAheadLog ignored =
                      new SegmentedFileWriteAheadLog(
-                             walDirectory,
+                             storage.walDirectory(),
                              walSegmentBytes,
                              assignment.lineage()
                      )) {

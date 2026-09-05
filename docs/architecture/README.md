@@ -19,6 +19,14 @@ The concise target is in
 and implementation order is in the
 [Distributed Queue Delivery Plan](../distributed-queue-delivery-plan.md).
 
+Milestone-specific designs:
+
+- [Storage architecture](../design/storage-architecture.md) — current files,
+  recovery authority, and phased evolution to replicated storage.
+- [v0.28 high-level design](../design/v0.28-durable-log-hld.md)
+- [v0.28 low-level design](../design/v0.28-durable-log-lld.md)
+- [ADR 0027: durable logical replicated log](../adr/0027-durable-logical-replicated-log.md)
+
 ## Living-document rules
 
 - Update these documents before implementing a changed invariant.

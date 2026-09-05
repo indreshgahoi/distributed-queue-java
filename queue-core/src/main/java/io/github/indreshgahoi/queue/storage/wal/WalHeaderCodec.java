@@ -12,7 +12,7 @@ final class WalHeaderCodec {
     private static final int WAL_MAGIC =
             0x4451574C;
 
-    private static final int WAL_VERSION = 2;
+    private static final int WAL_VERSION = 3;
 
     static final int HEADER_SIZE =
             Integer.BYTES

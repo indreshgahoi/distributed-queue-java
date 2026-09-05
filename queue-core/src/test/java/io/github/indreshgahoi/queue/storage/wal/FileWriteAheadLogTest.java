@@ -1377,7 +1377,7 @@ class FileWriteAheadLogTest {
         );
 
         assertEquals(
-                2,
+                3,
                 buffer.getInt()
         );
     }

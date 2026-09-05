@@ -25,12 +25,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32C;
 
 /**
- * Storage-cost experiment only. The one-force path is intentionally not a
- * production WAL implementation and cannot establish queue semantics.
+ * Compares the previous force-per-record path, the production durability-group
+ * path, and the original raw-file prototype that motivated the design.
  */
 @Fork(1)
 @Warmup(iterations = 2, time = 1)
@@ -44,6 +45,14 @@ public class BatchForcePrototypeBenchmark {
         for (int index = 0; index < state.batchSize; index++) {
             state.productionWal.append(state.record);
         }
+    }
+
+    @Benchmark
+    public void productionOneForcePerBatch(BenchmarkState state) {
+        state.productionWal.appendLocal(
+                1,
+                state.batchRecords
+        );
     }
 
     @Benchmark
@@ -67,6 +76,7 @@ public class BatchForcePrototypeBenchmark {
         private SegmentedFileWriteAheadLog productionWal;
         private FileChannel prototypeChannel;
         private WalRecord record;
+        private List<WalRecord> batchRecords;
         private ByteBuffer prototypeFrame;
 
         @Setup(Level.Iteration)
@@ -90,6 +100,10 @@ public class BatchForcePrototypeBenchmark {
                     null,
                     1,
                     Instant.parse("2026-09-03T00:00:00Z")
+            );
+            batchRecords = java.util.Collections.nCopies(
+                    batchSize,
+                    record
             );
             prototypeFrame = prototypeFrame(1024);
         }

@@ -6,6 +6,11 @@
 v0.27 supplies bounded HTTP batches. Elections, commit propagation, automatic
 workers, and snapshot installation remain target behavior.
 
+The concrete v0.28 logical-log proposal is defined in the
+[HLD](../design/v0.28-durable-log-hld.md),
+[LLD](../design/v0.28-durable-log-lld.md), and
+[ADR 0027](../adr/0027-durable-logical-replicated-log.md).
+
 ## Replica group
 
 ```mermaid

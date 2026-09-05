@@ -608,6 +608,12 @@ public final class LocalMessageQueue
             return new QueueSnapshot(
                     wal.storageLineage(),
                     position,
+                    wal instanceof io.github.indreshgahoi.queue.storage.replication.ReplicatedLog replicatedLog
+                            ? replicatedLog.lastLogPoint().logIndex()
+                            : 0,
+                    wal instanceof io.github.indreshgahoi.queue.storage.replication.ReplicatedLog replicatedLog
+                            ? replicatedLog.lastLogPoint().logTerm()
+                            : 0,
                     readySnapshot,
                     inFlightSnapshot,
                     delayedSnapshot,
@@ -634,6 +640,15 @@ public final class LocalMessageQueue
                 validateSnapshotLineage(
                         queueSnapshot
                 );
+                if (wal instanceof io.github.indreshgahoi.queue.storage.replication.ReplicatedLog replicatedLog) {
+                    replicatedLog.restoreSnapshotBoundary(
+                            new io.github.indreshgahoi.queue.storage.replication.LogPoint(
+                                    queueSnapshot.lastIncludedIndex(),
+                                    queueSnapshot.lastIncludedTerm()
+                            )
+                    );
+                }
+                validateSnapshotLogicalBoundary(queueSnapshot);
 
                 /*
                  * Establish snapshot as the recovery baseline.
@@ -682,6 +697,31 @@ public final class LocalMessageQueue
 
         materializeRecoveredState(states);
         restoreCapacityAccounting(states);
+    }
+
+    private void validateSnapshotLogicalBoundary(
+            QueueSnapshot snapshot
+    ) {
+        if (!(wal instanceof io.github.indreshgahoi.queue.storage.replication.ReplicatedLog replicatedLog)) {
+            return;
+        }
+
+        long includedIndex = snapshot.lastIncludedIndex();
+        long includedTerm = snapshot.lastIncludedTerm();
+        if (includedIndex > replicatedLog.localDurableIndex()) {
+            throw new IllegalStateException(
+                    "Snapshot logical boundary exceeds durable WAL index"
+            );
+        }
+
+        replicatedLog.entry(includedIndex).ifPresent(entry -> {
+            if (entry.logTerm() != includedTerm) {
+                throw new IllegalStateException(
+                        "Snapshot term does not match WAL entry at index "
+                                + includedIndex
+                );
+            }
+        });
     }
 
     private void requirePublishCapacity(int payloadBytes) {

@@ -1,438 +1,175 @@
 # Distributed Queue in Java
 
-A distributed message queue built incrementally from first
-principles to explore delivery semantics, ownership, leases,
-concurrency, durability, crash recovery, and replication.
+A Java 21 queue built incrementally to study the correctness mechanisms behind
+durable distributed systems: state machines, leases, write-ahead logging,
+snapshots, fencing, routing, replication, and failure recovery.
 
-## Why This Project
+This is a learning and architecture project, not a production-ready message
+broker or an attempt to copy every feature of an existing queue.
 
-The goal is not to build another production message broker.
+## Project status
 
-The goal is to understand which mechanisms are required
-to provide specific queue guarantees and how those mechanisms
-behave under failure.
+**Latest release:** v0.27.0 — bounded follower transport and one-cycle catch-up.
 
-## Current Scope
+**Current development:** v0.28.0 implementation — durable logical replicated
+log.
 
-Latest release: v0.27.0 — bounded replica transport and catch-up.
+The [v0.28 HLD](docs/design/v0.28-durable-log-hld.md),
+[LLD](docs/design/v0.28-durable-log-lld.md), and
+[ADR 0027](docs/adr/0027-durable-logical-replicated-log.md) define the logical
+index, term, hard-state, snapshot, recovery, and one-force batch boundaries.
+The implementation is based on the checked-in
+[v0.27.1 performance baseline](docs/benchmarks/v0.27.1/README.md).
 
-Current development: v0.27.1 — replication performance baseline. Checked-in
-JMH results isolate per-record force cost, a benchmark-only one-force batch,
-segment rotation, snapshot interference, producer contention, and physical
-partition startup density without changing production durability semantics.
+## What works today
 
-This is a replication storage primitive, not replicated queue availability.
-Transport, leader election, quorum commit, follower promotion, catch-up, and
-multi-partition routing are not yet included.
+- FIFO publication within one local partition;
+- receipt-handle ACK and NACK;
+- finite delivery leases, redelivery, retry limits, delayed retry, and DLQ;
+- retained-message and retained-byte admission limits;
+- WAL-first durable state transitions with CRC32C-protected frames;
+- persisted leases and restart recovery;
+- snapshots plus retained WAL suffix recovery;
+- segmented WAL rotation and snapshot-authorized reclamation;
+- durable queue/generation/partition lineage validation;
+- PostgreSQL-backed tenant queue metadata;
+- lease-fenced provisioning and runtime activation;
+- stable customer routing through the queue gateway;
+- epoch-fenced, ordered follower WAL storage;
+- bounded follower HTTP batches and resumable one-cycle catch-up;
+- durable logical index and term in segmented-WAL frames;
+- one-force follower durability groups and replica hard state;
+- snapshot logical boundaries that survive reclaimed WAL prefixes.
 
-The Maven build has five modules and three independently deployable services:
+## What is not guaranteed yet
 
-```text
-queue-core        durable local queue engine and storage state machine
-metadata-service Spring Boot control-plane service and PostgreSQL repository
-queue-node        Spring Boot reconciliation worker and local storage adapter
-queue-gateway     Spring Boot stable customer routing and forwarding service
-queue-benchmarks  JMH microbenchmarks and an executable benchmark artifact
+- no automatic replica placement or replication scheduler;
+- no majority-quorum acknowledgement;
+- no node-coordinated leader election;
+- no automatic follower promotion or divergent-log repair;
+- no snapshot transfer between nodes;
+- no multi-partition customer queue;
+- internal service endpoints are not authenticated;
+- no claim of production availability, security, or operational maturity.
+
+A follower copy is durable local storage, but it is not yet a committed replica.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Client --> Gateway[Queue Gateway :8082]
+    Gateway --> Metadata[Metadata Service :8080]
+    Gateway --> Node[Queue Node :8081]
+    Metadata --> Postgres[(PostgreSQL)]
+    Node --> Metadata
+    Node --> Storage[(Partition WAL + Snapshot)]
+    Node -. bounded follower batch .-> Follower[Another Queue Node]
 ```
 
-The metadata service keeps its domain authority independent of delivery and
-storage frameworks through explicit ports-and-adapters boundaries:
+| Module | Responsibility |
+|---|---|
+| `queue-core` | Local queue state machine, WAL, snapshots, compaction, and follower storage |
+| `metadata-service` | Tenant queue identity, node registry, placement, and fenced lifecycle authority |
+| `queue-node` | Partition reconciliation, local storage runtime, internal data plane, and follower transport |
+| `queue-gateway` | Stable customer endpoint and READY-authority routing |
+| `queue-benchmarks` | JMH performance experiments and checked-in evidence |
 
-```text
-metadata
-├── domain
-│   ├── model
-│   └── exception
-├── application
-│   ├── port.in
-│   ├── port.out
-│   └── service
-├── adapter
-│   ├── in.web
-│   └── out.postgres
-└── MetadataServiceApplication   Spring Boot composition root
+The metadata service and gateway use ports-and-adapters boundaries. PostgreSQL
+is control-plane authority; it is not in the message commit path and will not
+become a substitute for node-coordinated consensus.
+
+## Quick start
+
+Prerequisites: Java 21, Maven, Docker, and Docker Compose v2.
+
+```bash
+docker compose up --detach --build
+docker compose ps
 ```
 
-Domain types and ports are deliberate public contracts. Controllers,
-application-service implementations, persistence implementations, and their
-constructors remain package-private so callers cannot bypass those contracts.
+Open:
 
-The gateway follows the same dependency direction while keeping transport
-forwarding outside its routing policy:
+- metadata API: [http://localhost:8080/swagger-ui.html](http://localhost:8080/swagger-ui.html)
+- queue-node API: [http://localhost:8081/swagger-ui.html](http://localhost:8081/swagger-ui.html)
+- gateway API: [http://localhost:8082/swagger-ui.html](http://localhost:8082/swagger-ui.html)
 
-```text
-gateway
-├── domain
-│   ├── model
-│   └── exception
-├── application
-│   ├── port.in
-│   ├── port.out
-│   └── service
-├── adapter
-│   ├── in.web
-│   └── out.http
-└── QueueGatewayApplication     Spring Boot composition root
+Run the full test suite:
+
+```bash
+mvn clean test
 ```
 
-## Design Principles
+Detailed startup, API examples, configuration, reset procedures, and
+troubleshooting are in the
+[local development runbook](docs/runbooks/local-development.md).
 
-- Define guarantees before implementation.
-- Derive mechanisms from concrete failure scenarios.
-- Prefer explicit state machines.
-- Test failure behavior, not only happy paths.
-- Add complexity only when a requirement justifies it.
+## Current milestone
 
-Repository-wide conventions for architecture, Java formatting, naming,
-testing, logging, durability, API evolution, and review are defined in the
-[engineering guidelines](docs/engineering-guidelines.md).
+v0.28 addresses the correctness gap where follower sequence depended on
+counting retained WAL records and therefore failed after snapshot-authorized
+prefix reclamation.
 
-The v0.21 authority decision and end-to-end lifecycle are captured in
-[ADR 0020](docs/adr/0020-fenced-runtime-partition-activation.md) and the
-[runtime partition lifecycle](docs/diagrams/runtime-partition-lifecycle.md).
-The v0.22 request/closure ordering decision is captured in
-[ADR 0021](docs/adr/0021-authority-guarded-node-local-data-plane.md) and the
-[data-plane operation lifecycle](docs/diagrams/data-plane-operation-lifecycle.md).
-The v0.23 lock-scope decision is captured in
-[ADR 0022](docs/adr/0022-per-partition-runtime-admission.md) and the
-[per-partition runtime lifecycle](docs/diagrams/per-partition-runtime-lifecycle.md).
-The v0.24 admission boundary is captured in
-[ADR 0023](docs/adr/0023-bounded-retained-message-admission.md) and the
-[bounded admission lifecycle](docs/diagrams/bounded-admission-lifecycle.md).
-The v0.25 routing decision is captured in
-[ADR 0024](docs/adr/0024-stable-data-plane-routing-gateway.md), the
-[routing sequence](docs/diagrams/stable-routing-sequence.md), and the
-[routing decision flow](docs/diagrams/stable-routing-flow.md).
+The implementation:
+
+- stores `logIndex`, `logTerm`, and `WalRecord` in every replicated WAL frame;
+- retains `WalPosition` as the separate physical recovery boundary;
+- binds snapshots to logical index/term and physical position;
+- persists replica term, vote, and commit hard state;
+- writes a validated bounded batch followed by one `force(true)`;
+- recovers a complete prefix and poisons the writer after ambiguous I/O failure.
+
+It deliberately does not add quorum commit, election, membership, or promotion.
 
 ## Roadmap
 
-The long-term partition, replication, quorum, election, and failure-recovery
-model is defined in the
-[distributed queue target architecture](docs/distributed-queue-target-architecture.md).
-Detailed learning appendices and diagrams are indexed in the
-[distributed queue architecture handbook](docs/architecture/README.md).
-The reviewable milestone and issue breakdown is maintained in the
-[distributed queue delivery plan](docs/distributed-queue-delivery-plan.md).
-
-The roadmap is organized around correctness problems, not feature parity with
-existing brokers. Each milestone must identify a concrete limitation, define
-its invariants and failure semantics, and preserve a coherent path toward a
-distributed system.
-
-### Completed foundations
-
-1. **Queue state machine** — FIFO publication, explicit acknowledgement,
-   receipt-handle ownership, finite leases, redelivery, bounded retries,
-   delayed NACK, and dead-letter transitions.
-2. **Single-process concurrency** — coarse-grained locking establishes an
-   understandable linearization point for compound queue transitions.
-3. **Durable transitions** — WAL-first mutation ordering, failed-writer
-   poisoning, framed records, versioned headers, CRC32C integrity, and
-   recoverable active-tail truncation.
-4. **Durable delivery ownership** — active leases, attempts, receipt handles,
-   expiry, ACK, NACK, and DLQ decisions survive restart.
-5. **Bounded recovery history** — snapshots, `WalPosition`, snapshot plus WAL
-   suffix recovery, crash-safe snapshot replacement, segmented WAL rotation,
-   and snapshot-authorized whole-segment reclamation.
-6. **Compaction-aware recovery** — startup fails closed when reclaimed history
-   makes the authoritative snapshot mandatory, and snapshot authority remains
-   monotonic across restart.
-7. **Durable filesystem authority** — snapshot/WAL publication and segment
-   deletion include parent-directory durability boundaries.
-8. **Automatic bounded storage** — durable WAL progress triggers serialized
-   checkpoint, promotion, and reclamation cycles with observable retries.
-9. **Durable storage lineage** — WAL segments and snapshots are bound to one
-   queue, generation, and partition identity.
-10. **Shared metadata authority** — PostgreSQL owns tenant-scoped queue
-    identity, lifecycle, retry-safe creation, and optimistic-concurrency
-    fencing.
-11. **Lease-fenced provisioning** — queue nodes materialize lineage-bound
-    storage through durable claims and fenced lifecycle publication.
-12. **Fenced runtime activation** — queue nodes recover only authoritative
-    `ACTIVE` placements, publish readiness through PostgreSQL fencing, and
-    close runtimes when process authority is lost.
-13. **Authority-guarded data plane and baseline** — HTTP queue operations enter
-    only through READY runtime authority, use constant-time lookup, and have a
-    checked-in JMH baseline separating queue and forced-WAL costs.
-
-14. **Partition-scoped lifecycle concurrency** — per-partition admission
-    permits order operations against draining and closure without holding a
-    node-wide lock during storage I/O.
-15. **Bounded retained-message admission** — message and retained-state limits
-    reject overload before WAL mutation and survive recovery.
-16. **Stable data-plane routing** — a gateway resolves current READY authority,
-    forwards once, and preserves ambiguous mutation outcomes.
-17. **Ordered follower storage** — lineage, logical sequence, idempotent retry,
-    conflict detection, and durable leader-epoch fencing protect follower WALs.
-
-### Current milestone
-
-**v0.27.1 — Replication performance baseline**
-
-Measure the real cost of the current storage boundaries before designing the
-durable logical replicated log. The baseline shows that follower batch latency
-scales with its per-record force count and justifies a tested durable batch
-append boundary in v0.28. See
-[the checked-in results](docs/benchmarks/v0.27.1/README.md).
-
-### Next decision area
-
-The next planned milestone is **v0.28 — durable logical replicated log**:
-persist log index and term with every entry, introduce replica hard state, and
-carry the last included index and term through snapshots. Quorum acknowledgement
-and elections remain deliberately later phases.
-
-### Deliberately later
-
-Leader election, safe promotion, ownership transfer, partitioning, and quorum
-durability remain later phases. v0.27 does not call a follower copy committed,
-select replicas automatically, or allow a follower to serve traffic.
-
-## Metadata Service
-
-### Run locally with Docker Compose
-
-#### 1. Prerequisites
-
-- Docker Engine or Docker Desktop;
-- Docker Compose v2 (`docker compose version`);
-- ports `5432`, `8080`, `8081`, and `8082` available locally.
-
-All commands below run from the repository root.
-
-#### 2. Start PostgreSQL and the service
-
-Build the Java 21 service images and start all containers in the background:
-
-```bash
-docker compose up --detach --build
+```text
+v0.28  durable logical replicated log
+  ↓
+v0.29  replica membership and placement
+  ↓
+v0.30  automatic catch-up and learner bootstrap
+  ↓
+v0.31  majority commit and committed-only apply
+  ↓
+v0.32  node-coordinated leader election
+  ↓
+v0.33  safe promotion and replica repair
+  ↓
+later  multi-partition queue semantics
 ```
 
-Compose waits for PostgreSQL to become healthy before starting the metadata
-service. Flyway creates or upgrades the schema, and the queue node continuously
-reconciles newly created queues.
-
-Follow startup logs with:
-
-```bash
-docker compose logs --follow metadata-service
-```
-
-The service is ready after the log contains
-`Started MetadataServiceApplication`.
-
-#### 3. Verify readiness
-
-Check container state:
-
-```bash
-docker compose ps
-```
-
-`postgres` should report `healthy`; `metadata-service`, `queue-node`, and
-`queue-gateway` should report `Up`.
-Then verify the application health endpoint:
-
-```bash
-curl --fail http://localhost:8080/actuator/health
-```
-
-The response should contain `"status":"UP"`.
-
-#### 4. Test through Swagger UI
-
-Open the interactive API at:
+Every milestone follows:
 
 ```text
-http://localhost:8080/swagger-ui.html
+semantics → invariants → failure scenarios → tests → implementation
+          → regression → documentation → benchmark when required
 ```
 
-The raw OpenAPI document is available at:
+The detailed phases and issue-ready backlog are in the
+[delivery plan](docs/distributed-queue-delivery-plan.md).
 
-```text
-http://localhost:8080/v3/api-docs
-```
+## Documentation
 
-Swagger UI contains example tenant IDs, queue names, idempotency keys, request
-bodies, and responses. Select an operation, choose **Try it out**, keep or edit
-the example values, and execute the request against the local service.
+| Document | Purpose |
+|---|---|
+| [Semantics](docs/semantics.md) | Guarantees and explicit non-guarantees |
+| [Failure scenarios](docs/failure-scenarios.md) | Expected behavior at failure boundaries |
+| [Trade-offs](docs/trade-offs.md) | Benefits, costs, and deferred choices |
+| [Architecture handbook](docs/architecture/README.md) | Partition, replication, durability, metadata, and guarantee models |
+| [Storage architecture](docs/design/storage-architecture.md) | Current storage internals and phased distributed evolution |
+| [Target architecture](docs/distributed-queue-target-architecture.md) | Long-term distributed design |
+| [Delivery plan](docs/distributed-queue-delivery-plan.md) | Milestones and implementation order |
+| [ADRs](docs/adr) | Accepted and proposed architectural decisions |
+| [Diagrams](docs/diagrams/README.md) | Runtime and protocol flows |
+| [Engineering guidelines](docs/engineering-guidelines.md) | Code, naming, testing, and logging conventions |
+| [Local runbook](docs/runbooks/local-development.md) | Build, run, test, reset, and troubleshooting |
 
-Recommended first request:
+## Design principles
 
-1. Select `POST /api/v1/tenants/{tenantId}/queues`.
-2. Choose **Try it out**.
-3. Use tenant ID `acme`.
-4. Use idempotency key `create-orders-001`.
-5. Keep the example body `{"queueName":"orders"}`.
-6. Execute the request and expect `201 Created`.
-
-The create response may initially report `PROVISIONING`. Poll the GET operation:
-the queue node should create its lineage-bound WAL and promote the descriptor to
-`ACTIVE`. Provisioning is asynchronous, so clients must not treat the create
-response as storage readiness.
-
-#### 5. Test from the command line
-
-Create a queue:
-
-```bash
-curl --request POST \
-  http://localhost:8080/api/v1/tenants/acme/queues \
-  --header 'Content-Type: application/json' \
-  --header 'Idempotency-Key: create-orders-001' \
-  --data '{"queueName":"orders"}'
-```
-
-Read it back with:
-
-```bash
-curl http://localhost:8080/api/v1/tenants/acme/queues/orders
-```
-
-List all queues in the tenant:
-
-```bash
-curl http://localhost:8080/api/v1/tenants/acme/queues
-```
-
-Repeat the create request with the same idempotency key and body to verify
-retry safety: it returns the same queue identity rather than creating another
-queue.
-
-#### 6. Stop or reset the environment
-
-Stop containers while preserving PostgreSQL data:
-
-```bash
-docker compose down
-```
-
-To also remove PostgreSQL metadata and queue-node storage and start empty:
-
-```bash
-docker compose down --volumes
-```
-
-#### Troubleshooting: `UnknownHostException: postgres`
-
-If startup fails with `UnknownHostException: postgres`, the containers are no
-longer attached to a healthy Compose network. Recreate the containers and
-network without deleting the PostgreSQL volume:
-
-```bash
-docker compose down
-docker compose up --detach --build
-docker compose ps
-```
-
-Both services should report `Up`, and PostgreSQL should report `healthy`. Do
-not add `--volumes` when recovering the network unless discarding local
-metadata is intentional.
-
-If `docker compose` is unavailable but `docker-compose version` succeeds, use
-`docker-compose` in place of `docker compose` in the commands above.
-
-### Run the service from Maven
-
-To run Java on the host while PostgreSQL remains in Docker, start only the
-database:
-
-```bash
-docker compose up --detach postgres
-mvn -pl metadata-service -am install -DskipTests
-mvn -pl metadata-service spring-boot:run
-```
-
-The metadata service reads these environment variables when their defaults are
-not suitable:
-
-```text
-METADATA_DATABASE_URL=jdbc:postgresql://localhost:5432/queue_metadata
-METADATA_DATABASE_USER=queue
-METADATA_DATABASE_PASSWORD=queue
-METADATA_HTTP_PORT=8080
-```
-
-The queue node reads:
-
-```text
-QUEUE_NODE_ID=local-node-1
-QUEUE_NODE_ENDPOINT=http://localhost:8081
-METADATA_SERVICE_URL=http://localhost:8080
-QUEUE_STORAGE_ROOT=./queue-data
-NODE_REGISTRATION_LEASE_DURATION=PT30S
-NODE_HEARTBEAT_DELAY=PT10S
-PROVISIONING_LEASE_DURATION=PT30S
-PROVISIONING_POLL_DELAY=PT1S
-RUNTIME_PARTITION_POLL_DELAY=PT1S
-QUEUE_NODE_PORT=8081
-QUEUE_WAL_SEGMENT_BYTES=16777216
-QUEUE_MAX_MESSAGE_BYTES=262144
-QUEUE_MAX_RETAINED_MESSAGES=100000
-QUEUE_MAX_RETAINED_BYTES=1073741824
-QUEUE_GATEWAY_PORT=8082
-GATEWAY_CONNECT_TIMEOUT=PT2S
-GATEWAY_REQUEST_TIMEOUT=PT10S
-```
-
-Flyway applies versioned schema migrations before the service becomes ready.
-The REST resources are:
-
-```text
-POST   /api/v1/tenants/{tenantId}/queues
-GET    /api/v1/tenants/{tenantId}/queues/{queueName}
-GET    /api/v1/tenants/{tenantId}/queues
-DELETE /api/v1/tenants/{tenantId}/queues/{queueName}
-GET    /actuator/health
-```
-
-The queue node uses the trusted, non-customer provisioning endpoints under
-`/internal/v1/provisioning`. They are intentionally unauthenticated for this
-local learning deployment and must not be exposed outside a trusted network.
-Node registration, heartbeat, and topology inspection use `/internal/v1/nodes`
-and `/internal/v1/placements` under the same trust assumption. Runtime
-activation uses the fenced node-specific placement and status endpoints; local
-runtime inspection is available from the queue node:
-
-```text
-GET  /internal/v1/nodes/{nodeId}/runtime-placements?registrationEpoch={epoch}
-POST /internal/v1/partitions/{queueId}/{generationId}/{partitionId}/runtime-status
-GET  /internal/v1/runtime/partitions                metadata observation
-GET  http://localhost:8081/internal/v1/runtime/partitions
-                                                     node-local observation
-```
-
-Customer message operations use the stable queue gateway at
-`http://localhost:8082`. Gateway Swagger UI is available at
-`http://localhost:8082/swagger-ui.html`; queue-node Swagger remains available
-at `http://localhost:8081/swagger-ui.html` for trusted internal diagnosis.
-
-```text
-POST /v1/queues/{queueId}/messages
-POST /v1/queues/{queueId}/messages/receive
-POST /v1/queues/{queueId}/messages/{receiptHandle}/ack
-POST /v1/queues/{queueId}/messages/{receiptHandle}/nack
-```
-
-Publish accepts `{"payload":"process-order-123"}`. NACK accepts an ISO-8601
-duration such as `{"retryDelay":"PT30S"}`. An empty receive returns `204 No
-Content`; a queue without a currently READY route returns `503 Service
-Unavailable`. Oversized payloads return `413 Payload Too Large`; exhausted
-retained count or byte capacity returns `429 Too Many Requests`. Both publish
-rejections occur before WAL append. The gateway makes one metadata lookup and
-one node call per operation; it never automatically retries an ambiguous
-mutation.
-
-See the [provisioning sequence](docs/diagrams/provisioning-claim-sequence.md)
-and [decision flow](docs/diagrams/provisioning-claim-flow.md) for the complete
-lease and fencing protocol. See the
-[runtime lifecycle](docs/diagrams/runtime-partition-lifecycle.md) for recovery,
-readiness, failure, and deactivation transitions.
-
-`POST` requires an `Idempotency-Key` header and a JSON body such as
-`{"queueName":"orders"}`. It returns `201 Created`, a resource `Location`,
-and normally a `PROVISIONING` descriptor. Validation and domain failures use
-standard `application/problem+json` responses. The queue node later transitions
-the descriptor to `ACTIVE` through a lease-fenced internal API.
-PostgreSQL integration tests use an ephemeral Testcontainers database and are
-skipped when Docker is unavailable.
+- Define guarantees before implementation.
+- Derive mechanisms from concrete failure scenarios.
+- Keep control-plane observation separate from data-plane durability authority.
+- Fail closed when durable artifacts disagree.
+- Benchmark before optimizing a durability boundary.
+- Add complexity only when a real limitation requires it.

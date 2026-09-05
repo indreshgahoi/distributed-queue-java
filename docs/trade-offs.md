@@ -939,3 +939,40 @@ service behind application ports, but do not invent replica membership.
 - membership, automatic scheduling, lag metrics, and backoff orchestration;
 - quorum acknowledgement and leader commit index;
 - election, promotion, truncation, and repair.
+
+## v0.28.0 — Durable Logical Replicated Log
+
+### Decision
+
+Store consecutive logical index, originating term, and queue mutation in every
+segmented-WAL frame. Keep local `WalPosition` as a separate physical boundary,
+extend snapshots with the compacted index and term, publish lineage-bound
+replica hard state, and make a validated follower batch one force group.
+
+### Gain
+
+- logical identity survives rotation, restart, and snapshot-authorized prefix
+  reclamation;
+- retry and conflict detection no longer depend on retained record count;
+- snapshots preserve the historical term needed to match a compacted prefix;
+- hard state establishes durable term, vote, and commit authority for later
+  elections and quorum commit;
+- one force covers a complete bounded batch instead of forcing every record;
+- the public queue contract and existing single-node behavior remain unchanged.
+
+### Cost
+
+- WAL and snapshot formats intentionally advance and older files are rejected;
+- startup scans every retained entry to rebuild the in-memory logical index;
+- hard state adds an independently published artifact and ordering constraints;
+- a failed batch can leave a complete prefix and requires restart recovery;
+- an oversized durability group may exceed the normal segment target;
+- local commit and future majority commit must remain explicitly distinguished.
+
+### Deferred
+
+- automatic replication scheduling and replica membership;
+- majority acknowledgement and committed-only state-machine application;
+- leader election, promotion eligibility, and divergent suffix truncation;
+- snapshot transfer and automatic replica replacement;
+- persistent sparse indexes and cross-partition asynchronous group commit.

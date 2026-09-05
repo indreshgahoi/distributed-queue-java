@@ -36,18 +36,19 @@ final class LocalRuntimeQueueFactory implements RuntimeQueueFactory {
 
     @Override
     public RuntimeQueue open(PartitionPlacement placement) {
-        Path partitionRoot = storageRoot
-                .resolve(placement.queueId().toString())
-                .resolve(placement.generationId().toString())
-                .resolve("partition-" + placement.partitionId());
+        LocalPartitionStorageLayout storage =
+                LocalPartitionStorageLayout.resolve(
+                        storageRoot,
+                        placement.lineage()
+                );
         SegmentedFileWriteAheadLog wal = new SegmentedFileWriteAheadLog(
-                partitionRoot.resolve("wal"),
+                storage.walDirectory(),
                 walSegmentBytes,
                 placement.lineage()
         );
         try {
             FileQueueSnapshotStore snapshots = new FileQueueSnapshotStore(
-                    partitionRoot.resolve("snapshot.bin")
+                    storage.snapshotFile()
             );
             LocalMessageQueue queue = new LocalMessageQueue(
                     Clock.systemUTC(),

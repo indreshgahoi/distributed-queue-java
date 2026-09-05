@@ -85,7 +85,7 @@ class WalSegmentInitializerTest {
             );
 
             assertEquals(
-                    2,
+                    3,
                     header.getInt()
             );
         }

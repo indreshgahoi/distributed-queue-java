@@ -2,8 +2,14 @@
 
 ## Status
 
-**Target design requiring v0.27.1 benchmarks.** Current WAL append forces every
-record, including every record inside a received follower batch.
+**Measured target design.** Current WAL append forces every record, including
+every record inside a received follower batch. The v0.27.1 baseline confirms
+that force count dominates follower batch cost. v0.28 therefore proposes a
+per-partition one-force durable batch; asynchronous producer coalescing remains
+deferred.
+
+See the [benchmark results](../benchmarks/v0.27.1/README.md) and the
+[v0.28 low-level design](../design/v0.28-durable-log-lld.md).
 
 ## Current write path
 

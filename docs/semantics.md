@@ -2677,3 +2677,71 @@ v0.27 does not define replica membership or automatically schedule catch-up.
 It does not provide quorum acknowledgement, commit index, election, promotion,
 divergence repair, or replication-aware WAL reclamation. A leader replication
 source must fail if its requested logical history is no longer retained.
+
+## v0.28.0 — Durable Logical Replicated Log
+
+### G236 — Every segmented-WAL entry has stable logical identity
+
+Every entry stores a positive consecutive `logIndex`, a positive originating
+`logTerm`, and the complete `WalRecord` under one CRC32C checksum. Index zero
+and term zero jointly represent the empty prefix and are never encoded as an
+entry. Segment rotation, restart, and prefix reclamation do not renumber an
+entry.
+
+### G237 — Logical and physical positions have separate authority
+
+`LogPoint(index,term)` identifies partition history across replicas.
+`WalPosition(segment,offset)` identifies a byte boundary on one local replica.
+Neither value substitutes for the other. Replication uses logical identity;
+snapshot replay and whole-segment reclamation use the local physical position.
+
+### G238 — Local index assignment occurs inside serialized WAL append
+
+A local batch receives consecutive indexes while holding the WAL instance's
+append monitor. The client, HTTP layer, and metadata service cannot assign the
+authoritative index. Existing `MessageQueue` operations retain their local
+commit behavior and use term one until elected-term authority is introduced.
+
+### G239 — Replicated append validates the complete logical request
+
+Before writing, replicated append validates the previous log point, consecutive
+indexes, identical retry prefix, and absence of a conflicting retained entry.
+A gap or conflict performs no WAL mutation. Automatic conflicting-suffix
+truncation is not provided.
+
+### G240 — A successful batch crosses one local force boundary
+
+All new entries in a validated bounded batch are encoded and written to one
+active segment, followed by one `force(true)`. Success means the entire new
+suffix is locally durable. A write or force failure may leave a complete
+recoverable prefix, poisons the writer, and never acknowledges the requested
+batch boundary.
+
+### G241 — Logical progress survives reclaimed WAL prefixes
+
+The authoritative snapshot stores `lastIncludedIndex` and
+`lastIncludedTerm` together with its replica-local `WalPosition`. On recovery,
+that snapshot restores the compacted logical boundary. The first retained WAL
+entry must continue the logical history; requests at or before the reclaimed
+boundary fail explicitly rather than beginning at a later entry.
+
+### G242 — Replica hard state is lineage-bound durable authority
+
+`replica-hard-state.bin` stores `currentTerm`, optional `votedFor`, and
+`commitIndex` with lineage and CRC32C. Publication writes and forces a candidate,
+atomically replaces the authority file, and forces its directory. Term and
+commit index never regress, a vote cannot change within a term, and commit
+cannot exceed the local durable index.
+
+### G243 — Snapshot format version three binds logical and physical recovery
+
+Snapshot version three checksums the lineage, logical boundary, local physical
+position, and materialized queue state as one payload. Recovery rejects a
+snapshot whose retained boundary term disagrees with the WAL or whose included
+index exceeds locally durable history.
+
+### Explicit non-guarantees
+
+v0.28 does not provide automatic replica membership, majority commit, leader
+election, promotion, divergent-suffix repair, or snapshot transfer. Local queue
+acknowledgement still means local durability, not voting-majority durability.

@@ -32,7 +32,7 @@ public final class FileQueueSnapshotStore
             0x4451534E;
 
     private static final int SNAPSHOT_VERSION =
-            2;
+            3;
 
     private static final int CHECKSUM_BYTES =
             Integer.BYTES;
@@ -619,6 +619,13 @@ public final class FileQueueSnapshotStore
                 )
                 .append('\n');
 
+        builder.append("LOG_POINT")
+                .append(SEPARATOR)
+                .append(snapshot.lastIncludedIndex())
+                .append(SEPARATOR)
+                .append(snapshot.lastIncludedTerm())
+                .append('\n');
+
         for (ReadySnapshotEntry entry
                 : snapshot.ready()) {
 
@@ -740,6 +747,9 @@ public final class FileQueueSnapshotStore
         StorageLineage storageLineage =
                 null;
 
+        Long lastIncludedIndex = null;
+        Long lastIncludedTerm = null;
+
         List<ReadySnapshotEntry> ready =
                 new ArrayList<>();
 
@@ -810,6 +820,17 @@ public final class FileQueueSnapshotStore
                                             parts[2]
                                     )
                             );
+                }
+
+                case "LOG_POINT" -> {
+                    requireFieldCount(parts, 3, "LOG_POINT");
+                    if (lastIncludedIndex != null) {
+                        throw new SnapshotException(
+                                "Snapshot contains multiple logical boundaries"
+                        );
+                    }
+                    lastIncludedIndex = Long.parseLong(parts[1]);
+                    lastIncludedTerm = Long.parseLong(parts[2]);
                 }
 
                 case "READY" -> {
@@ -934,9 +955,17 @@ public final class FileQueueSnapshotStore
             );
         }
 
+        if (lastIncludedIndex == null || lastIncludedTerm == null) {
+            throw new SnapshotException(
+                    "Snapshot does not contain logical log boundary"
+            );
+        }
+
         return new QueueSnapshot(
                 storageLineage,
                 position,
+                lastIncludedIndex,
+                lastIncludedTerm,
                 ready,
                 inFlight,
                 delayed,

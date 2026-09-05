@@ -2,6 +2,7 @@ package io.github.indreshgahoi.queue.storage.wal;
 
 import io.github.indreshgahoi.queue.storage.StorageLineage;
 import io.github.indreshgahoi.queue.storage.WalPosition;
+import io.github.indreshgahoi.queue.storage.replication.LogEntry;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -119,7 +120,7 @@ public final class FileWriteAheadLog
         ensureAppendable();
 
         ByteBuffer frame =
-                frameCodec.encode(record);
+                frameCodec.encode(new LogEntry(1, 1, record));
 
         try {
             frameAppender.append(
@@ -329,7 +330,7 @@ public final class FileWriteAheadLog
 
             switch (frame.status()) {
                 case COMPLETE ->
-                        records.add(frame.record());
+                        records.add(frame.entry().record());
 
                 case CLEAN_EOF -> {
                     return List.copyOf(records);
